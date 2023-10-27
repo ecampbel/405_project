@@ -2,6 +2,19 @@
 
 [Oct 20](#oct-20)
 
+## Oct 27
+
+Imogen/Eleanor: 
+
+- find gene name (EGW) –> accession number data in order to parse Fares' gene table.
+- draft intro?
+- R fiddling with gene counts 
+
+Joe:
+
+- Try mapping reads to chloroplast reference genome next week some time
+- In RNAseq file there is an ummapped reads file
+
 ## Oct 20
 
 Assigned tasks to be completed by Oct 27:
