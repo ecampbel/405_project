@@ -11,7 +11,7 @@ Assigned tasks to be completed by Oct 27:
 - Imogen: look through gene count data
 - ??? : figure out data normalisation
 
-Overview of timeline pushing forwards:
+**Overview of timeline pushing forwards:**
 
 Ot 30th: Have draft pipeline in R ready for visualization and analysis
 
