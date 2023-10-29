@@ -2,27 +2,41 @@
 library(tidyr)
 library(dplyr)
 
-#Goal: add a column to the read data with gene function
+#Read gene function data
 gene_function_file <- "uniprotkb_taxonomy_id_188477_2023_10_29.tsv"
 gene_function_info <- read.delim(gene_function_file,header=TRUE,sep="\t") 
 gene_function_info <- gene_function_info[order(gene_function_info$Gene.Names),]
 
-read_files <- c("10d1ReadsPerGene.out.tab","10d2ReadsPerGene.out.tab","10d3ReadsPerGene.out.tab",
-                "apo1ReadsPerGene.out.tab","apo2ReadsPerGene.out.tab","apo3ReadsPerGene.out.tab")
+rf10d1 <- "10d1ReadsPerGene.out.tab"
+rf10d2 <- "10d2ReadsPerGene.out.tab"
+rf10d3 <- "10d3ReadsPerGene.out.tab"
+apod1 <- "apo1ReadsPerGene.out.tab"
+apod2 <- "apo2ReadsPerGene.out.tab"
+apod3 <- "apo3ReadsPerGene.out.tab"
 
-file <- read.delim("10d1ReadsPerGene.out.tab",header=FALSE,sep="\t") %>% tail(-4) 
-colnames(file) <-  c("Gene.Names","exp1","exp2","exp3")
+#Read and join our ReadsPerOut files
+merged_10d <- merge(read_it(rf10d1),read_it(rf10d2),by=c("Gene.Names")) %>% merge(read_it(rf10d3),by=c("Gene.Names"))
+merged_apo <- merge(read_it(apod1),read_it(apod2),by=c("Gene.Names")) %>% merge(read_it(apod3),by=c("Gene.Names"))
 
-for (rf in read_files) {main(r)}
+#For merged annotation files and their associated name (character), joins to gene functional info and writes to csv file
+main <- function(merged_file,name){
+  file_annotated <- left_join(merged_file,gene_function_info,by=c("Gene.Names"))
+  write_it(file_annotated,name)
+}
 
-main <- function(rf){
+### HELPER FUNCTIONS #####
+
+#Reads a ReadsPerGene.out.tab file, renames its columns.
+read_it <- function(rf){
   file <- read.delim(rf,header=FALSE,sep="\t") %>% tail(-4) 
-  colnames(file) <-  c("Gene.Names","Rep1","Rep2","Rep3")
-  file_annotated <- left_join(file,gene_function_info,by=c("Gene.Name"))
-  write_it(file,rf)
-}
+  colnames(file) <-  c("Gene.Names",paste(substring(rf,1,4),"Rep1",sep="_"),paste(substring(rf,1,4),"Rep2",sep="_"),paste(substring(rf,1,4),"Rep3",sep="_"))
+  return(file)
+  }
 
-write_it <- function(annotated,rf){
-  filename <- paste(rf,".annotated",sep="")
-  write(annotated, file=filename,sep="\t")
-}
+#Writes annotated files (with a name you provide)
+write_it <- function(annotated,name){
+  filename <- paste(name,".annotated.tsv",sep="")
+  print(filename)
+  write.table(annotated, file=filename,sep="\t",row.names=FALSE,col.names=TRUE)
+  }
+
