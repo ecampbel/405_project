@@ -43,4 +43,5 @@ write_it <- function(annotated,name){
 ##### ANNOTATION OF NORMALISED FILE
 normalised <- read.csv("echlorotica_TPM.csv") 
 names(gene_function_info)[names(gene_function_info) == 'Gene.Names'] <- 'geneID'
-normalsied_annotated <- left_join(normalised,gene_function_info,by=c("geneID"))
+normalised_annotated <- left_join(normalised,gene_function_info,by=c("geneID"))
+write_it(normalised_annotated,"normalised_annotated")
