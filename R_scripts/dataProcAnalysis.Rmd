@@ -1,0 +1,225 @@
+---
+title: "Echlorotica_ProcAnalysis"
+author: "Fares Burwag"
+date: "26/10/2023"
+output: html_document
+---
+
+```{r setup}
+
+library(tidyverse)
+library(pheatmap)
+library(limma)
+
+```
+
+
+
+```{r}
+
+t10echlorRep1_raw <- read_tsv("10d1ReadsPerGene.out.tab", skip = 4, col_names = F)
+t10echlorRep2_raw <- read_tsv("10d2ReadsPerGene.out.tab", skip = 4, col_names = F)
+t10echlorRep3_raw <- read_tsv("10d3ReadsPerGene.out.tab", skip = 4, col_names = F)
+apoechlorRep1_raw <- read_tsv("apo1ReadsPerGene.out.tab", skip = 4, col_names = F)
+apoechlorRep2_raw <- read_tsv("apo2ReadsPerGene.out.tab", skip = 4, col_names = F)
+apoechlorRep3_raw <- read_tsv("apo3ReadsPerGene.out.tab", skip = 4, col_names = F)
+
+colnames(t10echlorRep1_raw) <- c("geneID","totalReads","+","-")
+colnames(t10echlorRep2_raw) <- c("geneID","totalReads","+","-")
+colnames(t10echlorRep3_raw) <- c("geneID","totalReads","+","-")
+colnames(apoechlorRep1_raw) <- c("geneID","totalReads","+","-")
+colnames(apoechlorRep2_raw) <- c("geneID","totalReads","+","-")
+colnames(apoechlorRep3_raw) <- c("geneID","totalReads","+","-")
+
+t10echlorRep1Tidy_raw <- t10echlorRep1_raw %>%
+  select(-totalReads) %>%
+  pivot_longer(cols = c(2,3), names_to = "strand", values_to = "t10R1")
+t10echlorRep2Tidy_raw <- t10echlorRep2_raw %>%
+  select(-totalReads) %>%
+  pivot_longer(cols = c(2,3), names_to = "strand", values_to = "t10R2")
+t10echlorRep3Tidy_raw <- t10echlorRep3_raw %>%
+  select(-totalReads) %>%
+  pivot_longer(cols = c(2,3), names_to = "strand", values_to = "t10R3")
+apoechlorRep1Tidy_raw <- apoechlorRep1_raw %>%
+  select(-totalReads) %>%
+  pivot_longer(cols = c(2,3), names_to = "strand", values_to = "apoR1")
+apoechlorRep2Tidy_raw <- apoechlorRep2_raw %>%
+  select(-totalReads) %>%
+  pivot_longer(cols = c(2,3), names_to = "strand", values_to = "apoR2")
+apoechlorRep3Tidy_raw <- apoechlorRep3_raw %>%
+  select(-totalReads) %>%
+  pivot_longer(cols = c(2,3), names_to = "strand", values_to = "apoR3")
+
+mergedEchlorTidy_raw <- merge(t10echlorRep1Tidy_raw,t10echlorRep2Tidy_raw) %>%
+  merge(t10echlorRep3Tidy_raw) %>%
+  merge(apoechlorRep1Tidy_raw) %>%
+  merge(apoechlorRep2Tidy_raw) %>%
+  merge(apoechlorRep3Tidy_raw)
+
+echlorGTF_data <- read_tsv("GCA_003991915.1_ElyChl2.0_genomic.gtf", skip = 3, col_names = F)
+colnames(echlorGTF_data) <- c("accession", "source", "feature","start","end","spacer","strand","spacer2","description")
+echlorGeneGTF_data <- echlorGTF_data %>% filter(feature == "gene")
+
+echlorGeneGTF_data$geneID <- str_match(echlorGeneGTF_data$description, '(EGW[_0-9]*)')[,2]
+featAnnotations <- echlorGeneGTF_data[,c("accession","start","end","strand","geneID")]
+
+```
+
+```{r}
+
+## Are there any overlapping genes in the E chlor genome (annotations)
+featAnnotations %>%
+  arrange(accession, start) %>%
+  mutate(isOverlap = end > lead(start) | start < lag(end)) %>%
+  filter(isOverlap == TRUE)
+
+# Approximately 7000 cases of overlap across throughout the assembly
+
+
+temp <- mergedEchlorTidy_raw %>% 
+  filter(!paste0(geneID,strand) %in% paste0(featAnnotations$geneID,featAnnotations$strand)) %>%
+  mutate(summedReads = t10R1+t10R2+t10R3+apoR1+apoR2+apoR3) %>%
+  pull(summedReads)
+temp2 <- mergedEchlorTidy_raw %>% 
+  filter(paste0(geneID,strand) %in% paste0(featAnnotations$geneID,featAnnotations$strand)) %>%
+  mutate(summedReads = t10R1+t10R2+t10R3+apoR1+apoR2+apoR3) %>%
+  pull(summedReads)
+ggplot()+
+  geom_histogram(aes(x = temp), fill = "red", bins = 100, alpha = 0.3)+
+  geom_histogram(aes(x = temp2), fill = "blue", bins = 100, alpha = 0.3)+
+  xlim(c(0,500))
+
+```
+
+
+
+```{r}
+
+temp <- mergedEchlorTidy_raw %>% merge(featAnnotations, by = c("geneID", "strand"), all.x = TRUE) %>%
+  mutate(length = end - start)
+
+temp1 <- temp %>% filter(is.na(accession))
+temp2 <- temp %>% filter(!is.na(accession))
+
+temp2['t10R1'] <- temp2['t10R1'] + temp1['t10R1']
+temp2['t10R2'] <- + temp2['t10R2'] + temp1['t10R2']
+temp2['t10R3'] <- + temp2['t10R3'] + temp1['t10R3']
+temp2['apoR1'] <- temp2['apoR1'] + temp1['apoR1']
+temp2['apoR2'] <- + temp2['apoR2'] + temp1['apoR2']
+temp2['apoR3'] <- + temp2['apoR3'] + temp1['apoR3']
+
+mergedEchlorTidy_processed <- temp2
+
+```
+
+
+```{r}
+
+### Read count distribution
+
+ggplot(mergedEchlorTidy_processed)+
+  geom_histogram(aes(x=t10R1), bins = 100, alpha = 0.5, fill = "red")+
+  geom_histogram(aes(x=t10R2), bins = 100, alpha = 0.5, fill = "blue")+
+  geom_histogram(aes(x=t10R3), bins = 100, alpha = 0.5, fill = "orange")+
+  geom_histogram(aes(x=apoR1), bins = 100, alpha = 0.5, fill = "orange")+
+  geom_histogram(aes(x=apoR2), bins = 100, alpha = 0.5, fill = "orange")+
+  geom_histogram(aes(x=apoR3), bins = 100, alpha = 0.5, fill = "orange")+
+  xlim(0, 2000)+
+  ylim(0, 6000)
+
+### Total coverage comparison
+temp <- mergedEchlorTidy_processed %>% pivot_longer(cols = c(t10R1,t10R2,t10R3,apoR1,apoR2,apoR3), names_to = "sample", values_to = "reads")
+ggplot(temp)+
+  geom_boxplot(aes(x=sample, y = reads))+
+  scale_y_log10()
+ggplot(temp%>%group_by(sample) %>% summarize(totalCov=sum(reads)))+
+  geom_bar(aes(x = sample, y = totalCov), stat = "identity")
+
+```
+
+```{r}
+
+options(scipen=999)
+
+mergedEchlorTidy_RPK <- mergedEchlorTidy_processed %>%
+  mutate(across(t10R1:apoR3, function(x) x/length))
+
+echlor_scaling <- mergedEchlorTidy_RPK[,c(3:8)] %>%
+  apply(2, function(x) sum(x, na.rm = T)/10^6)
+
+mergedEchlorNorm_TPM <- mergedEchlorTidy_RPK
+mergedEchlorNorm_TPM[,c(3:8)] <- sweep(mergedEchlorNorm_TPM[,c(3:8)], 2, echlor_scaling, "/")
+
+arrange(mergedEchlorNorm_TPM, desc(t10R1))
+
+write_csv(mergedEchlorNorm_TPM,"echlorotica_TPM.csv")
+
+```
+
+
+```{r}
+
+temp <- mergedEchlorTidy_RPK %>% pivot_longer(cols = c(t10R1,t10R2,t10R3,apoR1,apoR2,apoR3), names_to = "sample", values_to = "reads")
+ggplot(temp)+
+  geom_boxplot(aes(x=sample, y = reads))+
+  scale_y_log10()
+ggsave("preNormDist_boxplot.png")
+ggplot(temp%>%group_by(sample) %>% summarize(totalCov=sum(reads)))+
+  geom_bar(aes(x = sample, y = totalCov), stat = "identity")
+ggsave("preNormCov_barplot.png")
+
+temp <- mergedEchlorNorm_TPM %>% pivot_longer(cols = c(t10R1,t10R2,t10R3,apoR1,apoR2,apoR3), names_to = "sample", values_to = "reads")
+
+ggplot(temp)+
+  geom_boxplot(aes(x=sample, y = reads))+
+  scale_y_log10()
+ggsave("postNormDist_boxplot.png")
+
+ggplot(temp%>%group_by(sample) %>% summarize(totalCov=sum(reads)))+
+  geom_bar(aes(x = sample, y = totalCov), stat = "identity")
+ggsave("postNormCov_barplot.png")
+
+```
+
+
+```{r}
+
+
+### Try using limma and EdgeR for differential expression analysis
+
+## Filtering proteins with less than 2 detected peptides [extremely low confidence]
+temp <- mergedEchlorNorm_TPM %>%
+  column_to_rownames("geneID")
+temp2 <- temp[,c(2:7)]
+temp3 <- log2(temp2+1)
+
+design_categories <- c(rep("d10_symb",3), rep("apo",3))
+design <- model.matrix(~ 0 + design_categories)
+colnames(design) <- gsub("design_categories", "", colnames(design))
+
+## Setting up contrasts for LIMMA
+categories <- c("d10_symb","apo")
+category_contrasts <- c()
+category_contrasts <- combn(categories, 2) %>% apply(2, function(x){
+  append(category_contrasts, paste0(x[[1]], "-", x[[2]]))
+})
+limmaContrasts <- makeContrasts(contrasts = category_contrasts, levels = design)
+limmaMatrix <- temp3 %>% as.matrix()
+
+## Fitting model
+limmaFit <- lmFit(limmaMatrix, design) %>%
+  contrasts.fit(limmaContrasts) %>%
+  eBayes()
+
+d10vsApo_hits <- topTable(limmaFit, coef = "d10_symb-apo",p.value = 0.01, number = 20000) %>%
+  arrange(adj.P.Val)
+
+write_csv(d10vsApo_hits, "d10vsApo_hits.csv")
+
+```
+
+
+
+
+
+
