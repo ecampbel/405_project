@@ -10,6 +10,11 @@ output: html_document
 library(tidyverse)
 library(pheatmap)
 library(limma)
+library(clusterProfiler)
+library(mgsa)
+library(DBI)
+library(enrichplot)
+
 
 ```
 
@@ -17,6 +22,7 @@ library(limma)
 
 ```{r}
 
+### Read in the raw gene counts
 t10echlorRep1_raw <- read_tsv("10d1ReadsPerGene.out.tab", skip = 4, col_names = F)
 t10echlorRep2_raw <- read_tsv("10d2ReadsPerGene.out.tab", skip = 4, col_names = F)
 t10echlorRep3_raw <- read_tsv("10d3ReadsPerGene.out.tab", skip = 4, col_names = F)
@@ -24,12 +30,16 @@ apoechlorRep1_raw <- read_tsv("apo1ReadsPerGene.out.tab", skip = 4, col_names = 
 apoechlorRep2_raw <- read_tsv("apo2ReadsPerGene.out.tab", skip = 4, col_names = F)
 apoechlorRep3_raw <- read_tsv("apo3ReadsPerGene.out.tab", skip = 4, col_names = F)
 
+### Rename columns (4 columns)
 colnames(t10echlorRep1_raw) <- c("geneID","totalReads","+","-")
 colnames(t10echlorRep2_raw) <- c("geneID","totalReads","+","-")
 colnames(t10echlorRep3_raw) <- c("geneID","totalReads","+","-")
 colnames(apoechlorRep1_raw) <- c("geneID","totalReads","+","-")
 colnames(apoechlorRep2_raw) <- c("geneID","totalReads","+","-")
 colnames(apoechlorRep3_raw) <- c("geneID","totalReads","+","-")
+
+### Convert table to long format to filter out the 'totalReads' 
+### column (kind of counterproductive since I sum them later anyways)
 
 t10echlorRep1Tidy_raw <- t10echlorRep1_raw %>%
   select(-totalReads) %>%
@@ -50,22 +60,47 @@ apoechlorRep3Tidy_raw <- apoechlorRep3_raw %>%
   select(-totalReads) %>%
   pivot_longer(cols = c(2,3), names_to = "strand", values_to = "apoR3")
 
+### Merge all 6 files into a merged table/dataset
 mergedEchlorTidy_raw <- merge(t10echlorRep1Tidy_raw,t10echlorRep2Tidy_raw) %>%
   merge(t10echlorRep3Tidy_raw) %>%
   merge(apoechlorRep1Tidy_raw) %>%
   merge(apoechlorRep2Tidy_raw) %>%
   merge(apoechlorRep3Tidy_raw)
 
+### Read in the mRNA data (obtained from FTP -> RNA_from_genomic.fna link)
+echlorGene_data <- read_delim("GCA_003991915.1_ElyChl2.0_rna_from_genomic.fna",col_names = F,delim = "§") %>%
+  mutate(geneID = str_match(X1, "locus_tag=([0-9A-Za-z_]*)")[,2],
+         accession = str_match(X1, "lcl\\|([0-9A-Za-z\\._]*)")[,1]) %>%
+  dplyr::select(geneID, accession) %>%
+  na.omit()
+
+### Read in the GTF feature file -> Pretty useless since there is no useful annotation here
 echlorGTF_data <- read_tsv("GCA_003991915.1_ElyChl2.0_genomic.gtf", skip = 3, col_names = F)
 colnames(echlorGTF_data) <- c("accession", "source", "feature","start","end","spacer","strand","spacer2","description")
 echlorGeneGTF_data <- echlorGTF_data %>% filter(feature == "gene")
+echlorGeneGTF_data$geneID <- str_match(echlorGeneGTF_data$description, '(EGW[_0-9]*)')[,1]
 
-echlorGeneGTF_data$geneID <- str_match(echlorGeneGTF_data$description, '(EGW[_0-9]*)')[,2]
 featAnnotations <- echlorGeneGTF_data[,c("accession","start","end","strand","geneID")]
+
+# read GO annotation file -> Obtained from EMBL website (look up E chlorotica GOA file), same as UNIPROT annotations
+echlorGAF <- readGAF(filename="4186132.E_chlorotica.goa.txt")
+
+# read in uniprot annotation file (refer to Imogen, I think from UNIRPOT 'Download' button)
+echloroticaAnnotation_data <- read_tsv("uniprotkb_elysia_chlorotica_2023_10_30.tsv")
+
+# GeneName to UniprotKey
+keyEchlor <- data.frame(geneID = echloroticaAnnotation_data$`Gene Names`,UNIPROTKB=echloroticaAnnotation_data$`Entry`)
+
+# Echlor KEGG inferred annotations, I used KAAS query. It simply BLASTs through mRNA file (refer to above) and finds
+# most similar KEGG annotated gene (I limited query to eukaryotes, this might not be ideal)
+echlor_Kegg_data <- read_tsv("eChlor_KEGGOut.txt",col_names = F) %>%
+  rename("X1" = "accession", "X2" = "ko_term") %>%
+  merge(echlorGene_data,all.x = TRUE) %>%
+  dplyr::select(2,3)
 
 ```
 
-```{r}
+```{r QC Determining overlapping genes}
 
 ## Are there any overlapping genes in the E chlor genome (annotations)
 featAnnotations %>%
@@ -74,8 +109,6 @@ featAnnotations %>%
   filter(isOverlap == TRUE)
 
 # Approximately 7000 cases of overlap across throughout the assembly
-
-
 temp <- mergedEchlorTidy_raw %>% 
   filter(!paste0(geneID,strand) %in% paste0(featAnnotations$geneID,featAnnotations$strand)) %>%
   mutate(summedReads = t10R1+t10R2+t10R3+apoR1+apoR2+apoR3) %>%
@@ -89,12 +122,16 @@ ggplot()+
   geom_histogram(aes(x = temp2), fill = "blue", bins = 100, alpha = 0.3)+
   xlim(c(0,500))
 
+# Overall, it doesn't matter whether there is an overlap or not. Read counts are grouped by geneID which
+# already accounts for 'strandedness'.
+
 ```
 
 
 
 ```{r}
 
+### Summing up + and - strand reads. This was pointless since totalReads was already a column earlier
 temp <- mergedEchlorTidy_raw %>% merge(featAnnotations, by = c("geneID", "strand"), all.x = TRUE) %>%
   mutate(length = end - start)
 
@@ -116,7 +153,6 @@ mergedEchlorTidy_processed <- temp2
 ```{r}
 
 ### Read count distribution
-
 ggplot(mergedEchlorTidy_processed)+
   geom_histogram(aes(x=t10R1), bins = 100, alpha = 0.5, fill = "red")+
   geom_histogram(aes(x=t10R2), bins = 100, alpha = 0.5, fill = "blue")+
@@ -135,21 +171,30 @@ ggplot(temp)+
 ggplot(temp%>%group_by(sample) %>% summarize(totalCov=sum(reads)))+
   geom_bar(aes(x = sample, y = totalCov), stat = "identity")
 
+### The above code suggests there is significant differences between samples in terms 
+### of coverage. As a result we need to normalize by depth (in addition to length)
+
 ```
 
 ```{r}
 
 options(scipen=999)
 
+## Normalize by read length (calculated earlier by end_position - start_position)
 mergedEchlorTidy_RPK <- mergedEchlorTidy_processed %>%
   mutate(across(t10R1:apoR3, function(x) x/length))
 
+## Calculate scaling factor (this is the sum of length-normalized reads in each sample. 
+## Divide by a million for TPM)
 echlor_scaling <- mergedEchlorTidy_RPK[,c(3:8)] %>%
   apply(2, function(x) sum(x, na.rm = T)/10^6)
 
+## Divide all values by the corresponding scaling factor. Sweep function applies a calculation
+## between table A and table B where tableB is just one row.
 mergedEchlorNorm_TPM <- mergedEchlorTidy_RPK
 mergedEchlorNorm_TPM[,c(3:8)] <- sweep(mergedEchlorNorm_TPM[,c(3:8)], 2, echlor_scaling, "/")
 
+## Sanity check to see most abundantly expressed t10R1 gene
 arrange(mergedEchlorNorm_TPM, desc(t10R1))
 
 write_csv(mergedEchlorNorm_TPM,"echlorotica_TPM.csv")
@@ -157,7 +202,7 @@ write_csv(mergedEchlorNorm_TPM,"echlorotica_TPM.csv")
 ```
 
 
-```{r}
+```{r pre and post normalization visualization}
 
 temp <- mergedEchlorTidy_RPK %>% pivot_longer(cols = c(t10R1,t10R2,t10R3,apoR1,apoR2,apoR3), names_to = "sample", values_to = "reads")
 ggplot(temp)+
@@ -186,6 +231,7 @@ ggsave("postNormCov_barplot.png")
 
 
 ### Try using limma and EdgeR for differential expression analysis
+### I only performed this using LIMMA, perhaps someone should try this with DESeq2 and EdgeR
 
 ## Filtering proteins with less than 2 detected peptides [extremely low confidence]
 temp <- mergedEchlorNorm_TPM %>%
@@ -197,7 +243,7 @@ design_categories <- c(rep("d10_symb",3), rep("apo",3))
 design <- model.matrix(~ 0 + design_categories)
 colnames(design) <- gsub("design_categories", "", colnames(design))
 
-## Setting up contrasts for LIMMA
+## Setting up contrasts/comparisons for LIMMA - Overkill code since it's only "d10_symb-apo"
 categories <- c("d10_symb","apo")
 category_contrasts <- c()
 category_contrasts <- combn(categories, 2) %>% apply(2, function(x){
@@ -206,19 +252,130 @@ category_contrasts <- combn(categories, 2) %>% apply(2, function(x){
 limmaContrasts <- makeContrasts(contrasts = category_contrasts, levels = design)
 limmaMatrix <- temp3 %>% as.matrix()
 
-## Fitting model
+## Fitting Bayesian model
 limmaFit <- lmFit(limmaMatrix, design) %>%
   contrasts.fit(limmaContrasts) %>%
   eBayes()
 
-d10vsApo_hits <- topTable(limmaFit, coef = "d10_symb-apo",p.value = 0.01, number = 20000) %>%
-  arrange(adj.P.Val)
+## Filter for hits that meet adjusted pVal threshold of 0.05 and a logFC of ±0.8
+d10vsApo_hits <- topTable(limmaFit, coef = "d10_symb-apo",p.value = 0.05, number = 20000) %>%
+  arrange(adj.P.Val) %>%
+  filter(abs(logFC)>0.8)
+
+d10vsApo_hits <- d10vsApo_hits %>%
+  merge(keyEchlor,by.x="row.names",by.y="geneID")
 
 write_csv(d10vsApo_hits, "d10vsApo_hits.csv")
+
 
 ```
 
 
+```{r}
+## Note - Only around 50% of the E chlorotica genome is actually annotated with any GO terms. For the remaining 50% of the genome we can either choose to ignore or we can try an use a homology-based search (something beyond a simple BLAST search)
+mergedEchlorTPM_annotated <- read_tsv("normalised_annotated.annotated.tsv")
+
+```
+
+Credits to Guido Hooiveld for inspiring the below two chunks of code
+Refer to this blogpost for how to write custom Gene Set Enrichment Analysis - Pretty helpful for any nonpara GSEA test
+[https://guangchuangyu.github.io/2015/05/use-clusterprofiler-as-an-universal-enrichment-analysis-tool/]
+
+```{r}
+
+mapping.index <-  echlorGAF@itemName2ItemIndex
+ID.annotations <- itemAnnotations(echlorGAF)
+
+GO.sets <- echlorGAF@sets
+GO.annotation <- setAnnotations(echlorGAF)
+
+
+# create a 2-column data frame with GOID and ID index
+# after little further processing, this will be used as input for clusterProfiler
+GO.df <- data.frame("GOID" = rep(names(GO.sets), sapply(GO.sets, length)),
+        "ID.index" = unlist(GO.sets),  row.names = NULL)
+
+# GO.annotation
+GO.annotation <- GO.annotation[GO.annotation[,"term"] != "all", ]
+GO.annotation[,"GOID"] <- rownames(GO.annotation)
+
+# GO.df
+GO.df <- GO.df[GO.df[,"GOID"] != "all", ]
+GO.df[,"UNIPROTKB"] <- names(mapping.index [GO.df[,"ID.index"] ])
+
+```
+
+```{r}
+
+eChlor_rankedGenes <- d10vsApo_hits %>%
+  arrange(desc(t)) %>%
+  pull(UNIPROTKB)
+
+eChlorGO_results <- enricher(
+    gene=eChlor_rankedGenes,
+    pvalueCutoff = 0.05,
+    pAdjustMethod = "BH",
+    universe = keyEchlor$UNIPROTKB,
+    minGSSize = 10,
+    maxGSSize = 500,
+    TERM2GENE = GO.df[,c("GOID","UNIPROTKB")],
+    TERM2NAME = GO.annotation[,c("GOID", "term")]
+)
+
+barplot(eChlorGO_results, showCategory=10)
+dotplot(eChlorGO_results, showCategory=10)
+cnetplot(eChlorGO_results, showCategory=10)
+heatplot(eChlorGO_results, showCategory=10)
+emapplot(pairwise_termsim(eChlorGO_results), node_scale=1.5,layout="kk" )
+
+as.data.frame(eChlorGO_results)
+```
+
+```{r}
+
+## Remove genes that have no corresponding mapped K term
+echlor_Kegg_data <- echlor_Kegg_data %>%
+  filter(!is.na(ko_term))
+
+## TERM2GENE (tibble that maps K term to pathway - needed by enricher)
+keggTemp <- bitr_kegg(echlor_Kegg_data$ko_term,"kegg","Path","ko") %>%
+  dplyr::select(2,1)
+
+temp <- echlor_Kegg_data %>% filter(geneID %in% d10vsApo_hits$Row.names)
+
+# temp2 <- d10vsApo_hits[d10vsApo_hits$Row.names%in%temp$geneID,]
+
+## Ignore below three lines
+fileConn <- file("output.txt")
+writeLines(temp$ko_term,fileConn)
+close(fileConn)
+
+## Use enrichKEGG. Universe refers to all identified KO terms that mapped to e-chlor
+keggResults <- enrichKEGG(gene=temp$ko_term,
+           organism ="ko",
+           pvalueCutoff = 0.05,
+           universe=echlor_Kegg_data$ko_term,
+           pAdjustMethod = "BH")
+
+# enricher(gene=temp$ko_term,
+#          pvalueCutoff = 0.05,
+#          pAdjustMethod = "BH",
+#          universe = echlor_Kegg_data$ko_term,
+#          TERM2GENE=keggTemp) %>%
+#   as.data.frame()
+
+as.data.frame(keggResults)
+
+
+```
+
+Things that still need to be done:
+* Create visualizations using KEGG and GO enrichment analysis
+* Repeat DGE using edgeR and DESeq2 -> Compare results to decide on best method
+* Create volcano or edgeR plot
+* Look into other possible annotation methods (KEGG coverage is pretty low - is there another database we can use?)
+* Run alignment for chloroplast genome to determine transcription of chloroplast DNA and what pathways involved
+  > Note: I think there's a way to break down FASTQ files based on taxonomy -> could be a good visualization?
 
 
 
