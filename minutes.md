@@ -6,7 +6,7 @@
 
 To-Do:
 
-- **Eleanor**: Learn (edgeR)[https://bioconductor.org/packages/release/bioc/vignettes/edgeR/inst/doc/edgeRUsersGuide.pdf] for differential expression
+- **Eleanor**: Learn [edgeR](https://bioconductor.org/packages/release/bioc/vignettes/edgeR/inst/doc/edgeRUsersGuide.pdf) for differential expression
 - **Eleanor**: Recount data in HTSeq
 - **Imogen**: Run STAR to align the unaligned sequences to chloroplast genome
 - **Fares**: Create visualisations for pathway analysis – within a pathway, which proteins are up/downregulated (can look at KEGG outputs, last column in Fares' code includes geneID **KO terms** for everything in pathway)
