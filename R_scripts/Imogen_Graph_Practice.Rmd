@@ -1,0 +1,71 @@
+---
+title: "Imogen_graph_practice"
+author: "Imogen"
+date: "2023-10-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("gene_function_annotation.R")
+```
+
+## Analysis of count data (as a whole)
+
+```{r}
+analysis <- matrix(nrow=nrow(normalised_annotated),ncol=10)
+for (n in 1:6){analysis[,n] <- normalised_annotated[,n+2]}
+for (n in 1:nrow(analysis)){analysis[n,7] <- mean(analysis[n,1:3])}  #d10 means
+for (n in 1:nrow(analysis)){analysis[n,8] <- sd(analysis[n,1:3])}   #d10 stdev
+for (n in 1:nrow(analysis)){analysis[n,9] <- mean(analysis[n,4:6])}  #apo means
+for (n in 1:nrow(analysis)){analysis[n,10] <- sd(analysis[n,4:6])}  #apo stdev
+analysis_df <- as.data.frame(analysis)
+colnames(analysis_df) <- c("t10R1","t10R2","t10R3","apoR1","apoR2","apoR3","t10_av","t10_sd","apo_av","apo_sd")
+analysis_df2 <- as.data.frame(matrix(nrow=nrow(normalised_annotated),ncol=6))
+for (n in 1:6){analysis_df2[,n] <- normalised_annotated[,n+2]}
+colnames(analysis_df2) <- c("t10R1","t10R2","t10R3","apoR1","apoR2","apoR3")
+analysis_df2 <- melt(analysis_df2)
+```
+
+## Gene counts normalised
+```{r}
+ggplot(analysis_df2,mapping=aes(variable,value))+geom_boxplot()+scale_y_log10() #recreates gene count
+```
+## Gene counts histograpm
+```{r}
+ggplot(analysis_df2,mapping=aes(value))+geom_histogram(bins=50)+scale_x_log10()        #as histogram, logarithmic
+```
+
+## Heatmap attempt 1
+```{r}
+normalised_annotated_data <- normalised_annotated[,c("Protein.names","t10R1","t10R2","t10R3","apoR1","apoR2","apoR3")] %>% 
+  filter(!(Protein.names %in% c("Uncharacterized protein", "NA")))
+normalised_annotated_data[,2:7] <- normalised_annotated_data[,2:7]+1
+normalised_annotated_data$t10dAv <- rowMeans(normalised_annotated_data[, 2:4])
+normalised_annotated_data$apoAv <- rowMeans(normalised_annotated_data[, 5:7])
+
+normalised_annotated_data$FoldChange <- normalised_annotated_data$t10dAv / normalised_annotated_data$apoAv
+normalised_annotated_data <- normalised_annotated_data[order(normalised_annotated_data$FoldChange, decreasing = TRUE),] 
+# Extract the top 10 upregulated and top 10 downregulated genes, create heatmap
+top_upregulated_genes <- normalised_annotated_data[1:50,]
+top_downregulated_genes <- normalised_annotated_data[nrow(normalised_annotated_data)-49:0, ]
+heatmap_data <- rbind(top_upregulated_genes, top_downregulated_genes)
+heatmap_data_melted <- melt(top_upregulated_genes,top_downregulated_genes, id.vars = "Protein.names") 
+heatmap_data_melted$variable <- substr(heatmap_data_melted$variable, 1,3) #if we want to merge treatments into one
+
+ggplot(heatmap_data_melted, aes(x=variable, y=Protein.names, fill=log(value))) +
+  geom_tile() +
+  scale_fill_gradient2(low="blue",mid="white",high="red",midpoint=log(1)) +
+  labs(x = "Replicates", y = "Genes", fill = "Expression") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+ggplot(heatmap_data_melted, aes(x=variable, y=Protein.names, fill=log(value))) +
+  geom_tile() +
+  scale_fill_gradient2(low="blue",mid="white",high="red",midpoint=log(1)) +
+  labs(x = "Replicates", y = "Genes", fill = "Expression") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
