@@ -1,6 +1,7 @@
 #/bin/envr/R!
 library(DESeq2)
 library(apeglm)
+library(tibble)
 sampleTable <- data.frame(Sample = c("Sample1", "Sample2", "Sample3"),
   Condition = c("d10", "d10", "d10", "apo","apo","apo"))
 
