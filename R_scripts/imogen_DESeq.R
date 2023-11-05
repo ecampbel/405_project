@@ -21,10 +21,14 @@ resOrdered <- na.omit(res[order(res$pvalue),])
 ### Filter for significance
 sig <- na.omit(res[na.omit(res$padj)<0.05,])
 sig_up <- as.data.frame(sig[sig$log2FoldChange>0,])
-sig_down <- sig[sig$log2FoldChange<0,]
+sig_down <- as.data.frame(sig[sig$log2FoldChange<0,])
 go_data <- gene_function_info[,c(4,8)]
+
 sig_up_annotated <- left_join(as.data.frame(rownames_to_column(sig_up)),go_data,by=c("rowname"="Gene.Names"))
-sig_up_annotated <- sig_up_annotated[sig_up_annotated$Gene.Ontology.IDs!="",]
+sig_up_annotated <- sig_up_annotated[sig_up_annotated$Gene.Ontology.IDs!="",] 
+sig_down_annotated <- left_join(as.data.frame(rownames_to_column(sig_down)),go_data,by=c("rowname"="Gene.Names"))
+sig_down_annotated <- sig_down_annotated[sig_down_annotated$Gene.Ontology.IDs!="",] 
+
 
 ### Get summary data
 summary(res)
