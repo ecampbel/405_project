@@ -28,7 +28,9 @@ sig_up_annotated <- left_join(as.data.frame(rownames_to_column(sig_up)),go_data,
 sig_up_annotated <- sig_up_annotated[sig_up_annotated$Gene.Ontology.IDs!="",] 
 sig_down_annotated <- left_join(as.data.frame(rownames_to_column(sig_down)),go_data,by=c("rowname"="Gene.Names"))
 sig_down_annotated <- sig_down_annotated[sig_down_annotated$Gene.Ontology.IDs!="",] 
+mat <- as.matrix()
 
+ggplot(sig_down_annotated, aes=())
 
 ### Get summary data
 summary(res)

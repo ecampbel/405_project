@@ -36,7 +36,7 @@ ggplot(analysis_df2,mapping=aes(variable,value))+geom_boxplot()+scale_y_log10() 
 ggplot(analysis_df2,mapping=aes(value))+geom_histogram(bins=50)+scale_x_log10()        #as histogram, logarithmic
 ```
 
-## Heatmap attempt 1
+## Heatmap attempt 1, simplified
 ```{r}
 normalised_annotated_data <- normalised_annotated[,c("Protein.names","t10R1","t10R2","t10R3","apoR1","apoR2","apoR3")] %>% 
   filter(!(Protein.names %in% c("Uncharacterized protein", "NA")))
