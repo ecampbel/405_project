@@ -53,12 +53,12 @@ rownames(res)[idx]
 ### Create PCA plots
 # test<-rlogTransformation(dds,blind=TRUE, fitType='local')
 vsd <- varianceStabilizingTransformation(dds, blind=FALSE)
-rld <- rlog(dds, blind=FALSE)
+# rld <- rlog(dds, blind=FALSE)
 DESeq2::plotPCA(vsd, intgroup=c("Condition"))
 
 ### Create Volcano plots using EnhancedVolcano
-EnhancedVolcano(resLFC, lab=rownames(res), x='log2FoldChange', y='pvalue',
-                pCutoff=10e-32, FCcutoff=0.5, pointSize=2.0, labSize = 4.0)
+EnhancedVolcano(resLFC, lab=NA, x='log2FoldChange', y='pvalue',
+                pCutoff=10e-32, FCcutoff=1, pointSize=2.0, labSize = 4.0)
                 #can select labels of interest if we wish
 ############################################################################################################
 ### Filter for significance -- not necessary.
