@@ -1,0 +1,813 @@
+---
+title: "Echlorotica_ProcAnalysis"
+author: "Fares Burwag"
+date: "26/10/2023"
+output: html_document
+---
+
+```{r setup}
+
+library(tidyverse)
+library(pheatmap)
+library(limma)
+library(DESeq2)
+library(clusterProfiler)
+library(mgsa)
+library(DBI)
+library(enrichplot)
+library(UpSetR)
+
+```
+
+
+
+```{r}
+
+### Read in the raw gene counts
+t10echlorRep1_raw <- read_tsv("10d1ReadsPerGene.out.tab", skip = 4, col_names = F)
+t10echlorRep2_raw <- read_tsv("10d2ReadsPerGene.out.tab", skip = 4, col_names = F)
+t10echlorRep3_raw <- read_tsv("10d3ReadsPerGene.out.tab", skip = 4, col_names = F)
+apoechlorRep1_raw <- read_tsv("apo1ReadsPerGene.out.tab", skip = 4, col_names = F)
+apoechlorRep2_raw <- read_tsv("apo2ReadsPerGene.out.tab", skip = 4, col_names = F)
+apoechlorRep3_raw <- read_tsv("apo3ReadsPerGene.out.tab", skip = 4, col_names = F)
+
+### Rename columns (4 columns)
+colnames(t10echlorRep1_raw) <- c("geneID","totalReads","+","-")
+colnames(t10echlorRep2_raw) <- c("geneID","totalReads","+","-")
+colnames(t10echlorRep3_raw) <- c("geneID","totalReads","+","-")
+colnames(apoechlorRep1_raw) <- c("geneID","totalReads","+","-")
+colnames(apoechlorRep2_raw) <- c("geneID","totalReads","+","-")
+colnames(apoechlorRep3_raw) <- c("geneID","totalReads","+","-")
+
+### Convert table to long format to filter out the 'totalReads' 
+### column (kind of counterproductive since I sum them later anyways)
+
+t10echlorRep1Tidy_raw <- t10echlorRep1_raw %>%
+  select(-totalReads) %>%
+  pivot_longer(cols = c(2,3), names_to = "strand", values_to = "t10R1")
+t10echlorRep2Tidy_raw <- t10echlorRep2_raw %>%
+  select(-totalReads) %>%
+  pivot_longer(cols = c(2,3), names_to = "strand", values_to = "t10R2")
+t10echlorRep3Tidy_raw <- t10echlorRep3_raw %>%
+  select(-totalReads) %>%
+  pivot_longer(cols = c(2,3), names_to = "strand", values_to = "t10R3")
+apoechlorRep1Tidy_raw <- apoechlorRep1_raw %>%
+  select(-totalReads) %>%
+  pivot_longer(cols = c(2,3), names_to = "strand", values_to = "apoR1")
+apoechlorRep2Tidy_raw <- apoechlorRep2_raw %>%
+  select(-totalReads) %>%
+  pivot_longer(cols = c(2,3), names_to = "strand", values_to = "apoR2")
+apoechlorRep3Tidy_raw <- apoechlorRep3_raw %>%
+  select(-totalReads) %>%
+  pivot_longer(cols = c(2,3), names_to = "strand", values_to = "apoR3")
+
+### Merge all 6 files into a merged table/dataset
+mergedEchlorTidy_raw <- merge(t10echlorRep1Tidy_raw,t10echlorRep2Tidy_raw) %>%
+  merge(t10echlorRep3Tidy_raw) %>%
+  merge(apoechlorRep1Tidy_raw) %>%
+  merge(apoechlorRep2Tidy_raw) %>%
+  merge(apoechlorRep3Tidy_raw)
+
+### Read in the mRNA data (obtained from FTP -> RNA_from_genomic.fna link)
+echlorGene_data <- read_delim("GCA_003991915.1_ElyChl2.0_rna_from_genomic.fna",col_names = F,delim = "§") %>%
+  mutate(geneID = str_match(X1, "locus_tag=([0-9A-Za-z_]*)")[,2],
+         accession = str_match(X1, "lcl\\|([0-9A-Za-z\\._]*)")[,1]) %>%
+  dplyr::select(geneID, accession) %>%
+  na.omit()
+
+### Read in the GTF feature file -> Pretty useless since there is no useful annotation here
+echlorGTF_data <- read_tsv("GCA_003991915.1_ElyChl2.0_genomic.gtf", skip = 3, col_names = F)
+colnames(echlorGTF_data) <- c("accession", "source", "feature","start","end","spacer","strand","spacer2","description")
+echlorGeneGTF_data <- echlorGTF_data %>% filter(feature == "gene")
+echlorGeneGTF_data$geneID <- str_match(echlorGeneGTF_data$description, '(EGW[_0-9]*)')[,1]
+
+featAnnotations <- echlorGeneGTF_data[,c("accession","start","end","strand","geneID")]
+
+# read GO annotation file -> Obtained from EMBL website (look up E chlorotica GOA file), same as UNIPROT annotations
+echlorGAF <- readGAF(filename="4186132.E_chlorotica.goa.txt")
+
+# read in uniprot annotation file (refer to Imogen, I think from UNIRPOT 'Download' button)
+echloroticaAnnotation_data <- read_tsv("uniprotkb_elysia_chlorotica_2023_10_30.tsv")
+
+# GeneName to UniprotKey
+keyEchlor <- data.frame(geneID = echloroticaAnnotation_data$`Gene Names`,UNIPROTKB=echloroticaAnnotation_data$`Entry`)
+
+# Echlor KEGG inferred annotations, I used KAAS query. It simply BLASTs through mRNA file (refer to above) and finds
+# most similar KEGG annotated gene (I limited query to eukaryotes, this might not be ideal)
+echlor_Kegg_data <- read_tsv("eChlor_KEGGOut.txt",col_names = F) %>%
+  dplyr::rename("accession"="X1","ko_term"="X2") %>%
+  merge(echlorGene_data,all.x = TRUE) %>%
+  dplyr::select(2,3)
+
+```
+
+
+```{r}
+
+### Summing up + and - strand reads. This was pointless since totalReads was already a column earlier
+temp <- mergedEchlorTidy_raw %>% merge(featAnnotations, by = c("geneID", "strand"), all.x = TRUE) %>%
+  mutate(length = end - start)
+
+temp1 <- temp %>% filter(is.na(accession))
+temp2 <- temp %>% filter(!is.na(accession))
+
+temp2['t10R1'] <- temp2['t10R1'] + temp1['t10R1']
+temp2['t10R2'] <- temp2['t10R2'] + temp1['t10R2']
+temp2['t10R3'] <- temp2['t10R3'] + temp1['t10R3']
+temp2['apoR1'] <- temp2['apoR1'] + temp1['apoR1']
+temp2['apoR2'] <- temp2['apoR2'] + temp1['apoR2']
+temp2['apoR3'] <- temp2['apoR3'] + temp1['apoR3']
+
+mergedEchlorTidy_processed <- temp2
+
+```
+
+
+
+```{r Normalize data}
+
+options(scipen=999)
+
+## Normalize by read length (calculated earlier by end_position - start_position)
+mergedEchlorTidy_RPK <- mergedEchlorTidy_processed %>%
+  mutate(across(t10R1:apoR3, function(x) x/length))
+
+## Calculate scaling factor (this is the sum of length-normalized reads in each sample. 
+## Divide by a million for TPM)
+echlor_scaling <- mergedEchlorTidy_RPK[,c(3:8)] %>%
+  apply(2, function(x) sum(x, na.rm = T)/10^6)
+
+## Divide all values by the corresponding scaling factor. Sweep function applies a calculation
+## between table A and table B where tableB is just one row.
+mergedEchlorNorm_TPM <- mergedEchlorTidy_RPK
+mergedEchlorNorm_TPM[,c(3:8)] <- sweep(mergedEchlorNorm_TPM[,c(3:8)], 2, echlor_scaling, "/")
+
+## Sanity check to see most abundantly expressed t10R1 gene
+arrange(mergedEchlorNorm_TPM, desc(t10R1))
+
+write_csv(mergedEchlorNorm_TPM,"echlorotica_TPM.csv")
+
+```
+
+
+```{r pre and post normalization visualization}
+
+temp <- mergedEchlorTidy_RPK %>% pivot_longer(cols = c(t10R1,t10R2,t10R3,apoR1,apoR2,apoR3), names_to = "sample", values_to = "reads")
+ggplot(temp)+
+  geom_boxplot(aes(x=sample, y = reads))+
+  scale_y_log10()
+ggsave("preNormDist_boxplot.png")
+ggplot(temp%>%group_by(sample) %>% summarize(totalCov=sum(reads)))+
+  geom_bar(aes(x = sample, y = totalCov), stat = "identity")
+ggsave("preNormCov_barplot.png")
+
+temp <- mergedEchlorNorm_TPM %>% pivot_longer(cols = c(t10R1,t10R2,t10R3,apoR1,apoR2,apoR3), names_to = "sample", values_to = "reads")
+
+ggplot(temp)+
+  geom_boxplot(aes(x=sample, y = reads))+
+  scale_y_log10()
+ggsave("postNormDist_boxplot.png")
+
+ggplot(temp%>%group_by(sample) %>% summarize(totalCov=sum(reads)))+
+  geom_bar(aes(x = sample, y = totalCov), stat = "identity")
+ggsave("postNormCov_barplot.png")
+
+```
+
+
+```{r LIMMA differential gene expression}
+### Note - none of this analysis or figures were includede in final manuscript.
+
+temp <- mergedEchlorNorm_TPM %>%
+  column_to_rownames("geneID")
+temp2 <- temp[,c(2:7)]
+temp3 <- log2(temp2+1)
+
+design_categories <- c(rep("d10_symb",3), rep("apo",3))
+design <- model.matrix(~ 0 + design_categories)
+colnames(design) <- gsub("design_categories", "", colnames(design))
+
+## Setting up contrasts/comparisons for LIMMA - Overkill code since it's only "d10_symb-apo"
+categories <- c("d10_symb","apo")
+category_contrasts <- c()
+category_contrasts <- combn(categories, 2) %>% apply(2, function(x){
+  append(category_contrasts, paste0(x[[1]], "-", x[[2]]))
+})
+limmaContrasts <- makeContrasts(contrasts = category_contrasts, levels = design)
+limmaMatrix <- temp3 %>% as.matrix()
+
+## Fitting Bayesian model
+limmaFit <- lmFit(limmaMatrix, design) %>%
+  contrasts.fit(limmaContrasts) %>%
+  eBayes()
+
+## Filter for hits that meet adjusted pVal threshold of 0.05 and a logFC of ±0.8
+d10vsApo_hits <- topTable(limmaFit, coef = "d10_symb-apo",p.value = 0.05, number = 20000) %>%
+  arrange(adj.P.Val) %>%
+  filter(abs(logFC)>0.8)
+
+d10vsApo_hits <- d10vsApo_hits %>%
+  merge(keyEchlor,by.x="row.names",by.y="geneID")
+
+write_csv(d10vsApo_hits, "d10vsApo_LIMMAhits.csv")
+
+
+```
+
+```{r DESeq2 differential expression analysis}
+
+library(DESeq2)
+library(EnhancedVolcano)
+library(apeglm)
+
+# Create a count matrix with genes as rows and samples as columns
+countMatrix <- mergedEchlorTidy_processed %>%
+  column_to_rownames('geneID') %>%
+  dplyr::select(2,3,4,5,6,7) %>%
+  as.matrix()
+colnames(countMatrix) <- c(rep("d10",3),rep("apo",3))
+
+### Create a DESeqDataSet object
+dds <- DESeqDataSetFromMatrix(countData = round(countMatrix), colData = sampleTable, design = ~ Condition) 
+dds <- DESeq(dds)
+res <- results(dds, name="Condition_d10_vs_apo")
+resLFC <- lfcShrink(dds, coef="Condition_d10_vs_apo", type="apeglm")
+resOrdered <- na.omit(res[order(res$padj),])
+
+### Create MA-plot (log2 fold changes over mean of normalised counts)
+DESeq2::plotMA(resLFC, main="title", colNonSig = "gray60",colSig = "blue",  colLine = "grey40") 
+idx <- identify(res$baseMean, res$log2FoldChange) #run to activate identifier <-  click on points to get gene ID
+rownames(res)[idx]
+
+### Create PCA plots
+# test<-rlogTransformation(dds,blind=TRUE, fitType='local')
+vsd <- varianceStabilizingTransformation(dds, blind=FALSE)
+rld <- rlog(dds, blind=FALSE)
+DESeq2::plotPCA(vsd, intgroup=c("Condition"))
+
+### Create Volcano plots using EnhancedVolcano
+EnhancedVolcano(resLFC, lab=rownames(res), x='log2FoldChange', y='pvalue',
+                pCutoff=10e-32, FCcutoff=1.75, pointSize=2.0, labSize = 4.0)
+                #can select labels of interest if we wish
+
+
+
+```
+
+```{r}
+
+### Comparing LIMMA to DESeq2
+limmaResults <- topTable(limmaFit,number = 100000)
+deseq2Results <- results(dds) %>% as.data.frame()
+
+limmaDeseq_List <- UpSetR::fromList(list(`DESeqHitsUP`=row.names(deseq2Results)[deseq2Results$padj<=0.05&deseq2Results$log2FoldChange>0],
+                      `DESeqHitsDOWN`=row.names(deseq2Results)[deseq2Results$padj<=0.05&deseq2Results$log2FoldChange<0],
+                      `LIMMAHitsUP`=row.names(limmaResults)[limmaResults$adj.P.Val<=0.05&limmaResults$logFC>0],
+                      `LIMMAHitsDOWN`=row.names(limmaResults)[limmaResults$adj.P.Val<=0.05&limmaResults$logFC<0]))
+
+UpSetR::upset(limmaDeseq_List)
+### DESeq seems to identify slightly more upregulated hits (43 more) while LIMMA identifies much more downregulated hits (1300 more). These are likely low expression genes - I'll take some time to check but this probably isn't super important.
+
+```
+
+
+```{r}
+## Note - Only around 50% of the E chlorotica genome is actually annotated with any GO terms. For the remaining 50% of the genome we can either choose to ignore or we can try an use a homology-based search (something beyond a simple BLAST search)
+mergedEchlorTPM_annotated <- read_tsv("normalised_annotated.annotated.tsv")
+
+```
+
+
+
+```{r KEGG pathway analysis}
+
+## Remove genes that have no corresponding mapped K term
+echlor_Kegg_data <- echlor_Kegg_data %>%
+  filter(!is.na(ko_term))
+
+## TERM2GENE (tibble that maps K term to pathway - needed by enricher)
+keggTemp <- bitr_kegg(echlor_Kegg_data$ko_term,"kegg","Path","ko") %>%
+  dplyr::select(2,1)
+
+temp <- echlor_Kegg_data %>% filter(geneID %in% d10vsApo_hits$Row.names)
+
+# temp2 <- d10vsApo_hits[d10vsApo_hits$Row.names%in%temp$geneID,]
+
+## Use enrichKEGG. Universe refers to all identified KO terms that mapped to e-chlor
+keggResults <- enrichKEGG(gene=temp$ko_term,
+           organism ="ko",
+           pvalueCutoff = 0.05,
+           universe=echlor_Kegg_data$ko_term,
+           pAdjustMethod = "BH")
+
+# enricher(gene=temp$ko_term,
+#          pvalueCutoff = 0.05,
+#          pAdjustMethod = "BH",
+#          universe = echlor_Kegg_data$ko_term,
+#          TERM2GENE=keggTemp) %>%
+#   as.data.frame()
+
+as.data.frame(keggResults)
+write_tsv(keggResults %>% as.data.frame(),"keggResults.tsv")
+
+tempVis <- barplot(keggResults, showCategory=15)
+ggsave("barplotKEGG.png",tempVis, height = 7,width = 8)
+tempVis <- dotplot(keggResults, showCategory=20)
+ggsave("dotplotKEGG.png",tempVis, height = 7,width = 8)
+# cnetplot(eChlorGO_results, showCategory=10)
+# heatplot(eChlorGO_results, showCategory=10)
+tempVis <- emapplot(pairwise_termsim(keggResults), node_scale=1.5,layout="kk")
+ggsave("emapplotKEGG.png",tempVis, width = 12, height = 12)
+
+```
+
+```{r heatmap visualization of KEGG pathways}
+kterm_key <- read_tsv("ko.txt",col_names = F) %>%
+  rename("desc"=2) %>%
+  dplyr::mutate(name = paste0(X1," -",str_match(desc,";([^;\\/\\[\\]]*)")[,2]))
+  # dplyr::mutate(name = gsub('(.{1,45})(\\s|$)', '\\1\n', name))
+
+
+## Insert specific kegg pathway of interest below then run chunk
+pathwayOfInterest <- "ko00710"
+
+tempKegg_res <- as.data.frame(keggResults)
+
+keggPathToTerm <- bitr_kegg(echlor_Kegg_data$ko_term,"kegg","Path","ko") %>%
+  dplyr::select(2,1)
+
+## The code below will open a window in KEGG with the pathway of interest
+## It will highlight KO genes differentially expressed in E-chlor (homologs)
+clusterProfiler::browseKEGG(x=tempKegg_res,pathID=pathwayOfInterest)
+
+## Creating heatmap of genes in pathway of interest
+## Filter K-terms that map to our pathway of interest
+ktermsInPath <- filter(keggPathToTerm,Path==pathwayOfInterest) %>%
+  pull(kegg)
+## There is some redundancy - i.e. there are multiple E. chlor genes that map to the same k-term
+genesInPath <- filter(echlor_Kegg_data,ko_term%in%ktermsInPath,geneID %in% d10vsApo_hits$Row.names) %>%
+  pull(geneID)
+## Filter normalized gene count data for those in our pathway
+tempData <- mergedEchlorNorm_TPM %>%
+  dplyr::filter(geneID %in% genesInPath, geneID %in% d10vsApo_hits$Row.names) %>%
+  column_to_rownames("geneID") %>%
+  dplyr::select(2:7)
+## Scale the data row by row (i.e. relative expression)
+tempMatrix <- as.matrix(tempData+1) %>%
+  apply(1,function(x) scale(x)) %>% t() %>%
+  na.omit()
+colnames(tempMatrix) <- colnames(tempData)
+
+## Heatma p using gene names
+geneHeatmap <- pheatmap(tempMatrix[rownames(tempMatrix)%in%d10vsApo_hits$Row.names,],
+         cluster_rows=T,
+         cluster_cols = F,
+         show_colnames = T)
+
+listIDs <- tempData %>%
+  merge(echlor_Kegg_data,by.x="row.names",by.y="geneID",all.x=T) %>%
+  dplyr::select(Row.names, ko_term) %>%
+  arrange(ko_term) %>%
+  merge(kterm_key[,c(1,3)],by.x="ko_term",by.y="X1",all.x = TRUE)
+
+## Collapsing gene names in k-terms (more relevant to Kegg pathway analysis)
+tempData_kterms <- tempData %>%
+  merge(listIDs,by.x="row.names",by.y="Row.names") %>%
+  dplyr::select(-Row.names,-ko_term) %>%
+  filter(!is.na(name)) %>%
+  dplyr::group_by(name) %>%
+  dplyr::summarize(across(1:6,function(x)sum(x,na.rm=T))) %>%
+  column_to_rownames("name")
+
+## Scale the data row by row (i.e. relative expression)
+tempMatrix_kterms <- as.matrix(tempData_kterms+1) %>%
+  apply(1,function(x) scale(x)) %>% t() %>%
+  na.omit()
+colnames(tempMatrix_kterms) <- colnames(tempData_kterms)
+
+## Heatmap using gene names
+ktermHeatmap <- pheatmap(tempMatrix_kterms,
+         cluster_rows=T,
+         cluster_cols = F,
+         show_colnames = T,
+         treeheight_row = 0,
+         cellheight = 25)
+
+
+ggsave(plot=geneHeatmap,filename=paste0(pathwayOfInterest,"_geneHeatmap.png"),
+       width = 10, height = nrow(tempMatrix)*0.3)
+ggsave(plot=ktermHeatmap,filename=paste0(pathwayOfInterest,"_ktermHeatmap.png"),
+       width = 7, height = nrow(tempMatrix_kterms)*0.45)
+
+```
+
+```{r}
+
+library("topGO")
+normalised_annotated <- read_tsv("normalised_annotated.annotated.tsv")
+
+#filter DESeq for significance
+sig <- na.omit(res)
+sig <- sig[sig$padj<0.05,]
+sig_up <- as.data.frame(sig[sig$log2FoldChange>=1,])
+sig_up <- tibble::rownames_to_column(sig_up, "gene_id")
+sig_down <- as.data.frame(sig[sig$log2FoldChange<=1,])
+sig_down <- tibble::rownames_to_column(sig_down, "gene_id")
+
+# read in the "gene universe" file
+go_data <- normalised_annotated[,c(1,19)]
+write_tsv(go_data,"echlor_GOIDs.tsv", col_names = FALSE)
+geneID2GO <- readMappings("echlor_GOIDs.tsv")
+geneUniverse <- names(geneID2GO)
+
+# read in the genes of interest
+
+# if feeding directly from DESeq2, then use the following instead
+upregulated_genes <- as.character(sig_up$gene_id)
+downregulated_genes <- as.character(sig_down$gene_id)
+
+# factor the names
+up_gene_list <- factor(as.integer(geneUniverse %in% upregulated_genes))
+down_gene_list <- factor(as.integer(geneUniverse %in% downregulated_genes))
+names(up_gene_list) <- geneUniverse
+names(down_gene_list) <- geneUniverse
+
+# build the GOdata object in topGO for upregulated
+up_GO_data <- new("topGOdata",
+                  description = "EChlor_apo_d10",
+                  ontology = "MF",
+                  allGenes = up_gene_list,
+                  annot = annFUN.gene2GO,
+                  gene2GO = geneID2GO)
+
+# build the GOdata object in topGO for downregulated
+down_GO_data <- new("topGOdata",
+                    description = "EChlor_apo_d10",
+                    ontology = "MF",
+                    allGenes = down_gene_list,
+                    annot = annFUN.gene2GO,
+                    gene2GO = geneID2GO)
+
+# run the Fisher's exact tests with the weight01 algorithm
+# resultClassic <- runTest(myGOdata, algorithm="classic", statistic="fisher")
+up_result <- runTest(up_GO_data,
+                     algorithm = "weight01",
+                     statistic = "fisher")
+down_result <- runTest(down_GO_data,
+                       algorithm = "weight01",
+                       statistic = "fisher")
+
+# summarize the results
+up_summary <- GenTable(up_GO_data,
+                       weight01 = up_result,
+                       orderBy = "up_result",
+                       ranksOf = "up_result",
+                       topNodes = 50)
+down_summary <- GenTable(down_GO_data,
+                         weight01 = down_result,
+                         orderBy = "down_result",
+                         ranksOf = "down_result",
+                         topNodes = 50)
+
+up_GO_filtered <- up_summary %>%
+  mutate(GeneRatio = Significant/Annotated, weight01 = as.numeric(weight01)) %>%
+  filter(weight01 <= 0.05) %>%
+  head(n = 20)
+
+up_GO_filtered_arranged <- up_GO_filtered %>% 
+  arrange(GeneRatio) %>%
+  mutate(Term = factor(Term))
+
+up_order_term <- up_GO_filtered_arranged %>% 
+  pull(Term) # pull() extracts a column as a vector
+
+
+up_GO_filtered %>% 
+  ggplot(aes(x = Term, y = GeneRatio)) +
+  geom_col(width = 0.05) + 
+  geom_point(size = 3) +
+  coord_flip() # Flip the axes so the x-axis labels are readable
+
+down_GO_filtered <- down_summary %>%
+  mutate(GeneRatio = Significant/Annotated, weight01 = as.numeric(weight01)) %>%
+  filter(weight01 <= 0.05) %>%
+  head(n = 20)
+
+down_GO_filtered %>% 
+  ggplot(aes(x = Term, y = GeneRatio)) +
+  geom_col(width = 0.05) + 
+  geom_point(size = 3) +
+  coord_flip() # Flip the axes so the x-axis labels are readable
+
+down_GO_filtered_arranged <- down_GO_filtered %>% 
+  arrange(GeneRatio) %>%
+  mutate(Term = factor(Term))
+
+# Now let's extract the order of the term column
+down_order_term <- down_GO_filtered_arranged %>% 
+  pull(Term) # pull() extracts a column as a vector
+
+
+down_GO_filtered_arranged %>% 
+  ggplot(aes(x= Term, y = GeneRatio, fill = weight01)) +
+  geom_point(size = 3) +
+  geom_col(width = 0.05) +
+  coord_flip() +
+  scale_x_discrete(limits = down_order_term) + 
+  scale_colour_gradient(low = "red", high = "blue")
+
+downGO_lollipop <- down_GO_filtered_arranged %>% 
+  ggplot(aes(x= Term, y = GeneRatio)) +
+  geom_col(width = 0.05, aes(fill = weight01)) +
+  geom_point(aes(size = Significant,color = weight01)) + 
+  coord_flip() +
+  scale_x_discrete(limits = down_order_term) +
+  scale_fill_gradient(low = "red", high = "blue") +
+  scale_color_gradient(low = "red", high = "blue") +
+  # Add these to make our plot prettier
+  theme_light() +
+  labs(x = "GO Term Description", y = "Enrichment Ratio", color = "Adjusted P-value", size = "Number of Significant Genes") + 
+  theme(panel.border = element_rect(color = "black"), panel.grid = element_line(colour = "grey96")) +
+  scale_y_continuous(limits = c(0,1.2), breaks = seq(0, 1, 0.25), expand = c(0, 0)) # this changes the scale of the axes
+
+upGO_lollipop <- up_GO_filtered_arranged %>% 
+  ggplot(aes(x= Term, y = GeneRatio)) +
+  geom_col(width = 0.05, aes(fill = weight01)) +
+  geom_point(aes(size = Significant,color = weight01)) + 
+  coord_flip() +
+  scale_x_discrete(limits = up_order_term) +
+  scale_fill_gradient(low = "red", high = "blue") +
+  scale_color_gradient(low = "red", high = "blue") +
+  # Add these to make our plot prettier
+  theme_light() +
+  labs(x = "GO Term Description", y = "Enrichment Ratio", color = "Adjusted P-value", size = "Number of Significant Genes") + 
+  theme(panel.border = element_rect(color = "black"), panel.grid = element_line(colour = "grey96")) +
+  scale_y_continuous(limits = c(0,1.2), breaks = seq(0, 1, 0.25), expand = c(0, 0)) # this changes the scale of the axes
+
+ggsave("downGO_lollipopPlot.png",downGO_lollipop, height = 2.5, width = 7)
+ggsave("upGO_lollipopPlot.png",upGO_lollipop, height = 2.5, width = 7)
+
+```
+
+
+
+```{r}
+
+# load topGO
+library("topGO")
+
+#filter DESeq for significance
+sig <- na.omit(res)
+sig <- sig[sig$padj<0.05,]
+sigdf <- as.data.frame(sig)
+sigdf <- tibble::rownames_to_column(sigdf, "gene_id")
+sig_up <- as.data.frame(sig[sig$log2FoldChange>=1,])
+sig_up <- tibble::rownames_to_column(sig_up, "gene_id")
+sig_down <- as.data.frame(sig[sig$log2FoldChange<=1,])
+sig_down <- tibble::rownames_to_column(sig_down, "gene_id")
+
+# read in the "gene universe" file
+go_data <- normalised_annotated[,c(1,19)]
+write_tsv(go_data,"echlor_GOIDs.tsv", col_names = FALSE)
+geneID2GO <- readMappings("echlor_GOIDs.tsv")
+geneUniverse <- names(geneID2GO)
+
+# read in the genes of interest
+
+# if feeding directly from DESeq2, then use the following instead
+upregulated_genes <- as.character(sig_up$gene_id)
+downregulated_genes <- as.character(sig_down$gene_id)
+
+# factor the names
+up_gene_list <- factor(as.integer(geneUniverse %in% upregulated_genes))
+down_gene_list <- factor(as.integer(geneUniverse %in% downregulated_genes))
+names(up_gene_list) <- geneUniverse
+names(down_gene_list) <- geneUniverse
+
+# build the GOdata object in topGO for upregulated
+up_GO_data <- new("topGOdata",
+                  description = "EChlor_apo_d10",
+                  ontology = "MF",
+                  allGenes = up_gene_list,
+                  annot = annFUN.gene2GO,
+                  gene2GO = geneID2GO)
+
+# build the GOdata object in topGO for downregulated
+down_GO_data <- new("topGOdata",
+                    description = "EChlor_apo_d10",
+                    ontology = "MF",
+                    allGenes = down_gene_list,
+                    annot = annFUN.gene2GO,
+                    gene2GO = geneID2GO)
+
+# run the Fisher's exact tests with the weight01 algorithm
+# resultClassic <- runTest(myGOdata, algorithm="classic", statistic="fisher")
+up_result <- runTest(up_GO_data,
+                     algorithm = "weight01",
+                     statistic = "fisher")
+down_result <- runTest(down_GO_data,
+                       algorithm = "weight01",
+                       statistic = "fisher")
+
+# summarize the results
+up_summary <- GenTable(up_GO_data,
+                       weight01 = up_result,
+                       orderBy = "up_result",
+                       ranksOf = "up_result",
+                       topNodes = 50)
+down_summary <- GenTable(down_GO_data,
+                         weight01 = down_result,
+                         orderBy = "down_result",
+                         ranksOf = "down_result",
+                         topNodes = 50)
+
+up_GO_filtered <- up_summary %>%
+  mutate(GeneRatio = Significant/Annotated, weight01 = as.numeric(weight01)) %>%
+  filter(weight01 <= 0.05) %>%
+  head(n = 20)
+
+up_GO_filtered_arranged <- up_GO_filtered %>% 
+  arrange(GeneRatio) %>%
+  mutate(Term = factor(Term))
+
+# Now let's extract the order of the term column
+up_order_term <- up_GO_filtered_arranged %>% 
+  pull(Term) # pull() extracts a column as a vector
+
+up_GO_filtered_arranged %>% 
+  ggplot(aes(x= Term, y = GeneRatio, color = weight01)) +
+  ggtitle("Significant Upregulated GO Terms with Ontology MF") +
+  geom_col(width = 0.05) +
+  geom_point(aes(size = Significant)) + 
+  coord_flip() +
+  scale_x_discrete(limits = up_order_term) +
+  scale_color_gradient(low = "red", high = "blue") +
+  
+  # Add these to make our plot prettier
+  theme_light() +
+  labs(x = "GO Term Description", y = "Enrichment Ratio", color = "P-value", size = "Number of Significant Genes") + 
+  theme(panel.border = element_rect(color = "black"), panel.grid = element_line(colour = "grey96")) +
+  scale_y_continuous(limits = c(0,1.1), breaks = seq(0, 1, 0.25), expand = c(0, 0)) # this changes the scale of the axes
+
+down_GO_filtered <- down_summary %>%
+  mutate(GeneRatio = Significant/Annotated, weight01 = as.numeric(weight01)) %>%
+  filter(weight01 <= 0.05) %>%
+  head(n = 20)
+
+down_GO_filtered_arranged <- down_GO_filtered %>% 
+  arrange(GeneRatio) %>%
+  mutate(Term = factor(Term))
+
+# Now let's extract the order of the term column
+down_order_term <- down_GO_filtered_arranged %>% 
+  pull(Term) # pull() extracts a column as a vector
+
+down_GO_filtered_arranged %>% 
+  ggplot(aes(x= Term, y = GeneRatio, color = weight01)) +
+  ggtitle("Significant Downregulated GO Terms with Ontology MF") +
+  geom_col(width = 0.05) +
+  geom_point(aes(size = Significant)) + 
+  coord_flip() +
+  scale_x_discrete(limits = down_order_term) +
+  scale_color_gradient(low = "red", high = "blue") +
+  
+  # Add these to make our plot prettier
+  theme_light() +
+  labs(x = "GO Term Description", y = "Enrichment Ratio", color = "P-value", size = "Number of Significant Genes") + 
+  theme(panel.border = element_rect(color = "black"), panel.grid = element_line(colour = "grey96")) +
+  scale_y_continuous(limits = c(0,1.1), breaks = seq(0, 1, 0.25), expand = c(0, 0)) # this changes the scale of the axes
+
+# Add labels to upregulated and downregulated dataframes
+up_GO <- up_summary %>% 
+  mutate(up_down = "UP")
+
+down_GO <- down_summary %>% 
+  mutate(up_down = "DOWN")
+
+# Make a joined dataframe
+joined_GO_filtered_arranged <- bind_rows(up_GO, down_GO) %>%
+  filter(weight01 <= 0.05) %>%
+  mutate(GeneRatio = Significant/Annotated, weight01 = as.numeric(weight01)) %>%
+  arrange(GeneRatio) %>%
+  mutate(Term = factor(Term)) %>%
+  head(n = 40)
+
+# Extract the column order
+order_term_joined <- joined_GO_filtered_arranged %>% 
+  pull(Term)
+
+joined_GO_filtered_arranged %>% 
+  ggplot(aes(x= Term, y = GeneRatio, color = weight01)) +
+  geom_point(aes(size= Significant)) +
+  coord_flip() +
+  scale_x_discrete(limits = order_term_joined) +
+  scale_color_gradient(low = "red", high = "blue") +
+  theme_light() +
+  labs(x = "GO Term Description", y = "Enrichment Ratio", color = "P-value", size = "Number of Significant Genes") +
+  theme(panel.border = element_rect(color = "black"), 
+        panel.grid = element_line(colour = "grey96"), 
+        strip.background = element_rect(colour = "black")) +
+  scale_y_continuous(limits = c(0, 1.1), breaks = seq(0, 1, 0.2), expand = c(0, 0)) +
+  facet_grid(.~ up_down)
+
+echlor_GOIDs <- read_tsv("echlor_GOIDs.tsv", col_names = c("gene_id", "GO_id"))
+GO_ID <- down_GO_filtered_arranged$GO.ID[2]
+filtered_GO_ID <- echlor_GOIDs %>%
+  filter(grepl(pattern = GO_ID, GO_id))
+
+gene_id_vector <- filtered_GO_ID %>% 
+  pull(gene_id)
+
+# Filter the data set
+dat_GO_filtered <- sigdf %>%
+  filter(gene_id %in% gene_id_vector) %>%
+  filter(padj <= 0.05 & log2FoldChange != 0)
+
+dat_GO_filtered %>% 
+  ggplot(aes(x = gene_id, y = log2FoldChange)) +
+  ggtitle("Genes Associated with GO:0004104 - Cholinesterase Activity") +
+  geom_errorbar(aes(ymin = log2FoldChange - lfcSE, ymax =log2FoldChange + lfcSE), width = 0.4) +
+  geom_bar(stat = "identity", color = "black", width = 0.8) +
+  coord_flip()+ 
+  labs(y = "log2(FC)", x= "Gene ID", fill = "Regulation") +
+  geom_hline(yintercept = 0) +
+  theme_light() +
+  theme(panel.border = element_rect(color = "black"), panel.grid = element_line(colour = "white"))
+
+
+```
+
+
+
+Credits to Guido Hooiveld for inspiring the below two chunks of code
+Refer to this blogpost for how to write custom Gene Set Enrichment Analysis - Pretty helpful for any nonpara GSEA test
+[https://guangchuangyu.github.io/2015/05/use-clusterprofiler-as-an-universal-enrichment-analysis-tool/]
+
+```{r GO dataset setup}
+
+## Below two chunks of code use a custom GO search. TopGO is used later on to generate the actual figures in our manuscript
+
+mapping.index <-  echlorGAF@itemName2ItemIndex
+ID.annotations <- itemAnnotations(echlorGAF)
+
+GO.sets <- echlorGAF@sets
+GO.annotation <- setAnnotations(echlorGAF)
+
+
+# create a 2-column data frame with GOID and ID index
+# after little further processing, this will be used as input for clusterProfiler
+GO.df <- data.frame("GOID" = rep(names(GO.sets), sapply(GO.sets, length)),
+        "ID.index" = unlist(GO.sets),  row.names = NULL)
+
+# GO.annotation
+GO.annotation <- GO.annotation[GO.annotation[,"term"] != "all", ]
+GO.annotation[,"GOID"] <- rownames(GO.annotation)
+
+# GO.df
+GO.df <- GO.df[GO.df[,"GOID"] != "all", ]
+GO.df[,"UNIPROTKB"] <- names(mapping.index [GO.df[,"ID.index"] ])
+
+```
+
+```{r GO enrichment results}
+
+eChlor_rankedGenes <- d10vsApo_hits %>%
+  arrange(desc(t)) %>%
+  pull(UNIPROTKB)
+
+eChlorGO_results <- enricher(
+    gene=eChlor_rankedGenes,
+    pvalueCutoff = 0.05,
+    pAdjustMethod = "BH",
+    universe = keyEchlor$UNIPROTKB,
+    minGSSize = 10,
+    maxGSSize = 500,
+    TERM2GENE = GO.df[,c("GOID","UNIPROTKB")],
+    TERM2NAME = GO.annotation[,c("GOID", "term")]
+)
+
+tempVis <- barplot(eChlorGO_results, showCategory=20)
+ggsave("barplotGO.png",tempVis, height = 10)
+tempVis <- dotplot(eChlorGO_results, showCategory=20)
+ggsave("dotplotGO.png",tempVis, height = 10)
+# cnetplot(eChlorGO_results, showCategory=10)
+# heatplot(eChlorGO_results, showCategory=10)
+tempVis <- emapplot(pairwise_termsim(eChlorGO_results), node_scale=1.5,layout="kk")
+ggsave("emapplotGO.png",tempVis, width = 12, height = 12)
+
+write_tsv(eChlorGO_results %>% as.data.frame(),"GOResults.tsv")
+
+```
+
+
+Things that still need to be done:
+* Create visualizations using KEGG and GO enrichment analysis
+* Repeat DGE using edgeR and DESeq2 -> Compare results to decide on best method
+* Create volcano or edgeR plot
+* Look into other possible annotation methods (KEGG coverage is pretty low - is there another database we can use?)
+* Run alignment for chloroplast genome to determine transcription of chloroplast DNA and what pathways involved
+  > Note: I think there's a way to break down FASTQ files based on taxonomy -> could be a good visualization?
+
+
+
+
