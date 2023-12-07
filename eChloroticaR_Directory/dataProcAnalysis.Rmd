@@ -321,9 +321,8 @@ ggsave(plot=ktermHeatmap,filename=paste0(pathwayOfInterest,"_ktermHeatmap_carbon
 
 ```
 
-## Imogen Analysis
+## PCA plots
 ```{r}
-### IMOGEN - PCOA + VOLCANO PLOTS
 library(apeglm)
 library(tibble)
 # source("gene_function_annotation.R")
@@ -349,16 +348,6 @@ res <- results(dds, name="Condition_d10_vs_apo")
 resLFC <- lfcShrink(dds, coef="Condition_d10_vs_apo", type="apeglm")
 resOrdered <- na.omit(res[order(res$padj),])
 
-### Create MA-plot (log2 fold changes over mean of normalised counts)
-DESeq2::plotMA(resLFC, main="title", colNonSig = "gray60",colSig = "blue",  colLine = "grey40") 
-# idx <- identify(res$baseMean, res$log2FoldChange) #run to activate identifier <-  click on points to get gene ID
-rownames(res)[idx]
-
-```
-
-## Generating PCA plot
-```{r, echo=FALSE}
-#Using prcomp
 countMatrix <- mergedEchlorNorm_TPM %>%
   column_to_rownames('geneID') %>%
   dplyr::select(2,3,4,5,6,7) %>% as.matrix()
@@ -371,18 +360,13 @@ g <- ggbiplot(pcobj = dds.pcoa, var.axes = FALSE,groups=c(rep("d10",3),rep("apo"
 g
 ggsave(g,file="PCA_plot_prcomp.png", width=4, height=4, dpi=300)
 
-
-#Using DESeq
-# vsd <- varianceStabilizingTransformation(dds, blind=FALSE)
-# rld <- rlog(dds, blind=FALSE)
-# DESeq2::plotPCA(vsd, intgroup=c("Condition")) +ggtitle("PCA from DESeq2 plotPCA")
 ```
 
-## Generating volcano plot
+## Generating volcano plots
 ```{r, echo=FALSE}
 library(EnhancedVolcano)
 library(ggbiplot)
-#Using ggplot
+#Using ggplot to tag points within a KEGG pathway
 volcano_data <- data.frame(log2FoldChange=res$log2FoldChange, log10P=-log10(res$padj), gene = rownames(res))
 volcano_data$inPathway <- ifelse(volcano_data$gene %in% genesInPath, TRUE,FALSE) 
 volcano_plot <- ggplot(volcano_data%>%arrange(inPathway), aes(x = log2FoldChange, y = log10P, color=inPathway)) +
@@ -393,7 +377,7 @@ volcano_plot <- ggplot(volcano_data%>%arrange(inPathway), aes(x = log2FoldChange
 volcano_plot
 ggsave(volcano_plot,file="volcano_carbonfixation.png", width=6, height=4, dpi=300)
 
-#Using Enhanced Volcano
+#Using Enhanced Volcano to summarise all data
 ### Create Volcano plots using EnhancedVolcano
 EnhancedVolcanoe <- EnhancedVolcano(resLFC, lab=NA, x='log2FoldChange', y='pvalue', selectLab = genesInPath,max.overlaps = 50,
                   drawConnectors = TRUE,widthConnectors = 0.75, pCutoff=0.05, FCcutoff=0.8, pointSize=2.0, labSize = 4.0)
@@ -402,7 +386,6 @@ ggsave(EnhancedVolcanoe,file="enhanced_volcano_blank.png",width=12, height=10,dp
 
 
 ```{r}
-
 ### Comparing LIMMA to DESeq2
 limmaResults <- topTable(limmaFit,number = 100000)
 deseq2Results <- results(dds) %>% as.data.frame()
