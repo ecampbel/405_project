@@ -1,0 +1,82 @@
+---
+title: "Volcano+PCA_plots"
+author: "Imogen"
+date: "2023-11-20"
+output: html_document
+---
+# DESea2 analysis
+```{r}
+### IMOGEN - PCOA + VOLCANO PLOTS
+library(apeglm)
+library(tibble)
+# source("gene_function_annotation.R")
+sampleTable <- data.frame(Sample = c("Sample1", "Sample2", "Sample3"),
+  Condition = c("d10", "d10", "d10", "apo","apo","apo"))
+
+#Read gene function data
+gene_function_file <- "uniprotkb_elysia_chlorotica_2023_10_30.tsv"
+gene_function_info <- read.delim(gene_function_file,header=TRUE,sep="\t") 
+gene_function_info <- echloroticaAnnotation_data[order(gene_function_info$Gene.Names),]
+
+# Create a count matrix with genes as rows and samples as columns
+countMatrix <- mergedEchlorTidy_processed %>%
+  column_to_rownames('geneID') %>%
+  dplyr::select(2,3,4,5,6,7) %>%
+  as.matrix()
+colnames(countMatrix) <- c(rep("d10",3),rep("apo",3))
+
+### Create a DESeqDataSet object
+dds <- DESeqDataSetFromMatrix(countData = round(countMatrix), colData = sampleTable, design = ~ Condition) 
+dds <- DESeq(dds)
+res <- results(dds, name="Condition_d10_vs_apo")
+resLFC <- lfcShrink(dds, coef="Condition_d10_vs_apo", type="apeglm")
+resOrdered <- na.omit(res[order(res$padj),])
+
+### Create MA-plot (log2 fold changes over mean of normalised counts)
+DESeq2::plotMA(resLFC, main="title", colNonSig = "gray60",colSig = "blue",  colLine = "grey40") 
+# idx <- identify(res$baseMean, res$log2FoldChange) #run to activate identifier <-  click on points to get gene ID
+rownames(res)[idx]
+
+```
+
+## Generating PCA plot
+```{r, echo=FALSE}
+#Using prcomp
+countMatrix <- mergedEchlorNorm_TPM %>%
+  column_to_rownames('geneID') %>%
+  dplyr::select(2,3,4,5,6,7) %>% as.matrix()
+colnames(countMatrix) <- c(rep("d10",3),rep("apo",3))
+
+dds.pcoa <- countMatrix %>% t() %>% prcomp()
+g <- ggbiplot(pcobj = dds.pcoa, var.axes = FALSE,groups=c(rep("d10",3),rep("apo",3)))+
+  geom_point(aes(colour=c("d10","d10","d10","apo","apo","apo")),size=2)+
+  coord_equal(ratio = 0.5)
+g
+ggsave(g,file="PCA_plot_prcomp.png", width=4, height=4, dpi=300)
+
+
+#Using DESeq
+# vsd <- varianceStabilizingTransformation(dds, blind=FALSE)
+# rld <- rlog(dds, blind=FALSE)
+# DESeq2::plotPCA(vsd, intgroup=c("Condition")) +ggtitle("PCA from DESeq2 plotPCA")
+```
+
+## Generating volcano plot 
+## Note: first need to run KEGG analysis and specifiy a pathway of interest for the ggplot version!
+```{r, echo=FALSE}
+library(EnhancedVolcano)
+library(ggbiplot)
+#Using ggplot
+volcano_data <- data.frame(log2FoldChange=res$log2FoldChange, log10P=-log10(res$padj), gene = rownames(res))
+volcano_data$inPathway <- ifelse(volcano_data$gene %in% genesInPath, TRUE,FALSE) 
+volcano_plot <- ggplot(volcano_data%>%arrange(inPathway), aes(x = log2FoldChange, y = log10P, color=inPathway)) +
+    geom_point(alpha=0.5) + theme_minimal() +
+    scale_color_manual(values = c("FALSE" = "grey", "TRUE"="red")) +  
+    labs(title = "Volcano Plot",x = "log2(Fold Change)",y = "-log10(Adjusted P-value)",color="In Pathway")
+volcano_plot
+
+#Using Enhanced Volcano
+### Create Volcano plots using EnhancedVolcano
+EnhancedVolcano(resLFC, lab=rownames(resLFC), x='log2FoldChange', y='pvalue', selectLab = genesInPath,max.overlaps = 50,
+                  drawConnectors = TRUE,widthConnectors = 0.75, pCutoff=0.001, FCcutoff=1.5, pointSize=2.0, labSize = 4.0)
+```
