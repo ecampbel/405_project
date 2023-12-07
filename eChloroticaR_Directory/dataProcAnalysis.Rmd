@@ -1,0 +1,485 @@
+---
+title: "Echlorotica_ProcAnalysis"
+author: "Fares Burwag"
+date: "26/10/2023"
+output: html_document
+---
+
+```{r setup}
+library(tidyverse)
+library(pheatmap)
+library(limma)
+library(DESeq2)
+library(clusterProfiler)
+library(mgsa)
+library(DBI)
+library(enrichplot)
+library(UpSetR)
+```
+
+
+
+```{r read in raw counts and produce dataframe}
+
+### Read in the raw gene counts
+t10echlorRep1_raw <- read_tsv("10d1ReadsPerGene.out.tab", skip = 4, col_names = F)
+t10echlorRep2_raw <- read_tsv("10d2ReadsPerGene.out.tab", skip = 4, col_names = F)
+t10echlorRep3_raw <- read_tsv("10d3ReadsPerGene.out.tab", skip = 4, col_names = F)
+apoechlorRep1_raw <- read_tsv("apo1ReadsPerGene.out.tab", skip = 4, col_names = F)
+apoechlorRep2_raw <- read_tsv("apo2ReadsPerGene.out.tab", skip = 4, col_names = F)
+apoechlorRep3_raw <- read_tsv("apo3ReadsPerGene.out.tab", skip = 4, col_names = F)
+
+### Rename columns (4 columns)
+colnames(t10echlorRep1_raw) <- c("geneID","totalReads","+","-")
+colnames(t10echlorRep2_raw) <- c("geneID","totalReads","+","-")
+colnames(t10echlorRep3_raw) <- c("geneID","totalReads","+","-")
+colnames(apoechlorRep1_raw) <- c("geneID","totalReads","+","-")
+colnames(apoechlorRep2_raw) <- c("geneID","totalReads","+","-")
+colnames(apoechlorRep3_raw) <- c("geneID","totalReads","+","-")
+
+### Convert table to long format to filter out the 'totalReads' 
+### column (kind of counterproductive since I sum them later anyways)
+
+t10echlorRep1Tidy_raw <- t10echlorRep1_raw %>%
+  dplyr::select(-totalReads) %>%
+  pivot_longer(cols = c(2,3), names_to = "strand", values_to = "t10R1")
+t10echlorRep2Tidy_raw <- t10echlorRep2_raw %>%
+  dplyr::select(-totalReads) %>%
+  pivot_longer(cols = c(2,3), names_to = "strand", values_to = "t10R2")
+t10echlorRep3Tidy_raw <- t10echlorRep3_raw %>%
+  dplyr::select(-totalReads) %>%
+  pivot_longer(cols = c(2,3), names_to = "strand", values_to = "t10R3")
+apoechlorRep1Tidy_raw <- apoechlorRep1_raw %>%
+  dplyr::select(-totalReads) %>%
+  pivot_longer(cols = c(2,3), names_to = "strand", values_to = "apoR1")
+apoechlorRep2Tidy_raw <- apoechlorRep2_raw %>%
+  dplyr::select(-totalReads) %>%
+  pivot_longer(cols = c(2,3), names_to = "strand", values_to = "apoR2")
+apoechlorRep3Tidy_raw <- apoechlorRep3_raw %>%
+  dplyr::select(-totalReads) %>%
+  pivot_longer(cols = c(2,3), names_to = "strand", values_to = "apoR3")
+
+### Merge all 6 files into a merged table/dataset
+mergedEchlorTidy_raw <- merge(t10echlorRep1Tidy_raw,t10echlorRep2Tidy_raw) %>%
+  merge(t10echlorRep3Tidy_raw) %>%
+  merge(apoechlorRep1Tidy_raw) %>%
+  merge(apoechlorRep2Tidy_raw) %>%
+  merge(apoechlorRep3Tidy_raw)
+
+### Read in the mRNA data (obtained from FTP -> RNA_from_genomic.fna link)
+echlorGene_data <- read_delim("GCA_003991915.1_ElyChl2.0_rna_from_genomic.fna",col_names = F,delim = "§") %>%
+  mutate(geneID = str_match(X1, "locus_tag=([0-9A-Za-z_]*)")[,2],
+         accession = str_match(X1, "lcl\\|([0-9A-Za-z\\._]*)")[,1]) %>%
+  dplyr::select(geneID, accession) %>% na.omit()
+
+### Read in the GTF feature file -> Pretty useless since there is no useful annotation here
+echlorGTF_data <- read_tsv("GCA_003991915.1_ElyChl2.0_genomic.gtf", skip = 3, col_names = F)
+colnames(echlorGTF_data) <- c("accession", "source", "feature","start","end","spacer","strand","spacer2","description")
+echlorGeneGTF_data <- echlorGTF_data %>% filter(feature == "gene")
+echlorGeneGTF_data$geneID <- str_match(echlorGeneGTF_data$description, '(EGW[_0-9]*)')[,1]
+featAnnotations <- echlorGeneGTF_data[,c("accession","start","end","strand","geneID")]
+
+# read GO annotation file -> Obtained from EMBL website (look up E chlorotica GOA file), same as UNIPROT annotations
+echlorGAF <- readGAF(filename="4186132.E_chlorotica.goa.txt")
+
+# read in uniprot annotation file (refer to Imogen, I think from UNIRPOT 'Download' button)
+echloroticaAnnotation_data <- read_tsv("uniprotkb_elysia_chlorotica_2023_10_30.tsv")
+
+# GeneName to UniprotKey
+keyEchlor <- data.frame(geneID = echloroticaAnnotation_data$`Gene Names`,UNIPROTKB=echloroticaAnnotation_data$`Entry`)
+
+# Echlor KEGG inferred annotations, I used KAAS query. It simply BLASTs through mRNA file (refer to above) and finds
+# most similar KEGG annotated gene (I limited query to eukaryotes, this might not be ideal)
+echlor_Kegg_data <- read_tsv("eChlor_KEGGOut.txt",col_names = FALSE,show_col_types = FALSE)
+echlor_Kegg_data <- plyr::rename(echlor_Kegg_data, c("X1" = "accession", "X2" = "ko_term")) %>%
+  merge(echlorGene_data,all.x = TRUE) %>%
+  dplyr::select(2,3)
+
+```
+
+
+```{r}
+
+### Summing up + and - strand reads. This was pointless since totalReads was already a column earlier
+temp <- mergedEchlorTidy_raw %>% merge(featAnnotations, by = c("geneID", "strand"), all.x = TRUE) %>%
+  mutate(length = end - start)
+
+temp1 <- temp %>% filter(is.na(accession))
+temp2 <- temp %>% filter(!is.na(accession))
+
+temp2['t10R1'] <- temp2['t10R1'] + temp1['t10R1']
+temp2['t10R2'] <- temp2['t10R2'] + temp1['t10R2']
+temp2['t10R3'] <- temp2['t10R3'] + temp1['t10R3']
+temp2['apoR1'] <- temp2['apoR1'] + temp1['apoR1']
+temp2['apoR2'] <- temp2['apoR2'] + temp1['apoR2']
+temp2['apoR3'] <- temp2['apoR3'] + temp1['apoR3']
+
+mergedEchlorTidy_processed <- temp2
+
+```
+
+
+
+```{r Normalize data}
+
+options(scipen=999)
+
+## Normalize by read length (calculated earlier by end_position - start_position)
+mergedEchlorTidy_RPK <- mergedEchlorTidy_processed %>%
+  mutate(across(t10R1:apoR3, function(x) x/length))
+
+## Calculate scaling factor (this is the sum of length-normalized reads in each sample. 
+## Divide by a million for TPM)
+echlor_scaling <- mergedEchlorTidy_RPK[,c(3:8)] %>%
+  apply(2, function(x) sum(x, na.rm = T)/10^6)
+
+## Divide all values by the corresponding scaling factor. Sweep function applies a calculation
+## between table A and table B where tableB is just one row.
+mergedEchlorNorm_TPM <- mergedEchlorTidy_RPK
+mergedEchlorNorm_TPM[,c(3:8)] <- sweep(mergedEchlorNorm_TPM[,c(3:8)], 2, echlor_scaling, "/")
+
+## Sanity check to see most abundantly expressed t10R1 gene
+arrange(mergedEchlorNorm_TPM, desc(t10R1))
+
+write_csv(mergedEchlorNorm_TPM,"echlorotica_TPM.csv")
+
+```
+
+
+```{r pre and post normalization visualization}
+
+temp <- mergedEchlorTidy_RPK %>% pivot_longer(cols = c(t10R1,t10R2,t10R3,apoR1,apoR2,apoR3), names_to = "sample", values_to = "reads")
+ggplot(temp)+ geom_boxplot(aes(x=sample, y = reads))+ scale_y_log10() + ggtitle("preNormDis read counts")
+# ggsave("preNormDist_boxplot.png")
+ggplot(temp%>%group_by(sample) %>% summarize(totalCov=sum(reads)))+
+  geom_bar(aes(x = sample, y = totalCov), stat = "identity") + ggtitle("preNormDis read counts")
+ggsave("preNormCov_barplot.png")
+
+temp <- mergedEchlorNorm_TPM %>% pivot_longer(cols = c(t10R1,t10R2,t10R3,apoR1,apoR2,apoR3), names_to = "sample", values_to = "reads")
+
+# ggplot(temp)+
+#   geom_boxplot(aes(x=sample, y = reads))+
+#   scale_y_log10()+ ggtitle("postNormDis read counts")
+# ggsave("postNormDist_boxplot.png")
+# 
+# ggplot(temp%>%group_by(sample) %>% summarize(totalCov=sum(reads)))+
+#   geom_bar(aes(x = sample, y = totalCov), stat = "identity")+ ggtitle("postNormDis read counts")
+# ggsave("postNormCov_barplot.png")
+
+```
+
+
+```{r}
+
+## Filtering proteins with less than 2 detected peptides [extremely low confidence]
+temp <- mergedEchlorNorm_TPM %>%
+  column_to_rownames("geneID")
+temp2 <- temp[,c(2:7)]
+temp3 <- log2(temp2+1)
+
+design_categories <- c(rep("d10_symb",3), rep("apo",3))
+design <- model.matrix(~ 0 + design_categories)
+colnames(design) <- gsub("design_categories", "", colnames(design))
+
+## Setting up contrasts/comparisons for LIMMA - Overkill code since it's only "d10_symb-apo"
+categories <- c("d10_symb","apo")
+category_contrasts <- c()
+category_contrasts <- combn(categories, 2) %>% apply(2, function(x){
+  append(category_contrasts, paste0(x[[1]], "-", x[[2]]))
+})
+limmaContrasts <- makeContrasts(contrasts = category_contrasts, levels = design)
+limmaMatrix <- temp3 %>% as.matrix()
+
+## Fitting Bayesian model
+limmaFit <- lmFit(limmaMatrix, design) %>%
+  contrasts.fit(limmaContrasts) %>%
+  eBayes()
+
+## Filter for hits that meet adjusted pVal threshold of 0.05 and a logFC of ±0.8
+d10vsApo_hits <- topTable(limmaFit, coef = "d10_symb-apo",p.value = 0.05, number = 20000) %>%
+  dplyr::arrange(adj.P.Val) %>%
+  dplyr::filter(abs(logFC)>0.8)
+
+d10vsApo_hits <- d10vsApo_hits %>%
+  merge(keyEchlor,by.x="row.names",by.y="geneID")
+
+# write_csv(d10vsApo_hits, "d10vsApo_LIMMAhits.csv")
+
+
+```
+## KEGG analysis
+```{r KEGG pathway analysis}
+
+## Remove genes that have no corresponding mapped K term
+echlor_Kegg_data <- echlor_Kegg_data %>%
+  filter(!is.na(ko_term))
+
+## TERM2GENE (tibble that maps K term to pathway - needed by enricher)
+keggTemp <- bitr_kegg(echlor_Kegg_data$ko_term,"kegg","Path","ko") %>%
+  dplyr::select(2,1)
+
+temp <- echlor_Kegg_data %>% dplyr::filter(geneID %in% d10vsApo_hits$Row.names)
+
+# temp2 <- d10vsApo_hits[d10vsApo_hits$Row.names%in%temp$geneID,]
+
+## Use enrichKEGG. Universe refers to all identified KO terms that mapped to e-chlor
+keggResults <- enrichKEGG(gene=temp$ko_term,organism ="ko",
+           pvalueCutoff = 0.05,
+           universe=echlor_Kegg_data$ko_term,
+           pAdjustMethod = "BH")
+
+# enricher(gene=temp$ko_term,
+#          pvalueCutoff = 0.05,
+#          pAdjustMethod = "BH",
+#          universe = echlor_Kegg_data$ko_term,
+#          TERM2GENE=keggTemp) %>%
+#   as.data.frame()
+
+as.data.frame(keggResults)
+write_tsv(keggResults %>% as.data.frame(),"keggResults.tsv")
+
+tempVis <- barplot(keggResults, showCategory=20)
+ggsave("barplotKEGG.png",tempVis, height = 10)
+tempVis <- dotplot(keggResults, showCategory=20)
+ggsave("dotplotKEGG.png",tempVis, height = 10)
+# cnetplot(eChlorGO_results, showCategory=10)
+# heatplot(eChlorGO_results, showCategory=10)
+tempVis <- emapplot(pairwise_termsim(keggResults), node_scale=1.5,layout="kk")
+ggsave("emapplotKEGG.png",tempVis, width = 12, height = 12)
+
+```
+
+```{r heatmap visualization of KEGG pathways}
+## XYZ
+## EDIT PATHWAY OF INTEREST HERE (ko00010 = Glycolysis / Gluconeogenesis, ko00480 = glutathione)
+pathwayOfInterest <- "ko00480" 
+
+tempKegg_res <- as.data.frame(keggResults)
+
+keggPathToTerm <- bitr_kegg(echlor_Kegg_data$ko_term,"kegg","Path","ko") %>%
+  dplyr::select(2,1)
+
+## The code below will open a window in KEGG with the pathway of interest
+## It will highlight KO genes differentially expressed in E-chlor (homologs)
+# clusterProfiler::browseKEGG(x=tempKegg_res,pathID=pathwayOfInterest)
+
+## Creating heatmap of genes in pathway of interest
+## Filter K-terms that map to our pathway of interest
+ktermsInPath <- dplyr::filter(keggPathToTerm,Path==pathwayOfInterest) %>%
+  dplyr::pull(kegg)
+## There is some redundancy - i.e. there are multiple E. chlor genes that map to the same k-term
+genesInPath <- dplyr::filter(echlor_Kegg_data,ko_term%in%ktermsInPath) %>%
+  pull(geneID)
+
+sig_genesInPath <- data.frame(log2FoldChange=res$log2FoldChange, log10P=-log10(res$padj), gene = rownames(res)) %>% filter(gene%in%genesInPath) %>% 
+  filter(log2FoldChange>=0.8 | log2FoldChange<=-0.8) %>% 
+  filter(log10P>=(-log10(0.0)))
+paste(nrow(sig_genesInPath)," significantly dif. expressed genes in ",pathwayOfInterest)
+
+## Filter normalized gene count data for those in our pathway
+tempData <- mergedEchlorNorm_TPM %>%
+  filter(geneID %in% genesInPath) %>%
+  column_to_rownames("geneID") %>%
+  dplyr::select(2:7)
+## Scale the data row by row (i.e. relative expression)
+tempMatrix <- as.matrix(tempData+1) %>%
+  apply(1,function(x) scale(x)) %>% t() %>%
+  na.omit()
+colnames(tempMatrix) <- colnames(tempData)
+
+## Heatmap using gene names
+geneHeatmap <- pheatmap(tempMatrix,
+         cluster_rows=T,
+         cluster_cols = F,
+         show_colnames = T)
+
+## Collapsing gene names in k-terms (more relevant to KEGG pathway analysis)
+tempData_kterms <- tempData %>%
+  merge(echlor_Kegg_data,by.x="row.names",by.y="geneID",all.x=T) %>%
+  dplyr::select(-Row.names) %>%
+  dplyr::group_by(ko_term) %>%
+  dplyr::summarize(dplyr::across(1:6,function(x)sum(x,na.rm=T))) %>%
+  column_to_rownames("ko_term")
+
+## Scale the data row by row (i.e. relative expression)
+tempMatrix_kterms <- as.matrix(tempData_kterms+1) %>%
+  apply(1,function(x) scale(x)) %>% t() %>%
+  na.omit()
+colnames(tempMatrix_kterms) <- colnames(tempData_kterms)
+
+## Heatmap using gene names
+ktermHeatmap <- pheatmap(tempMatrix_kterms,
+         cluster_rows=T,
+         cluster_cols = F,
+         show_colnames = T)
+
+
+ggsave(plot=geneHeatmap,filename=paste0(pathwayOfInterest,"_geneHeatmap_carbonfixation.png"),
+       width = 10, height = nrow(tempMatrix)*0.3)
+ggsave(plot=ktermHeatmap,filename=paste0(pathwayOfInterest,"_ktermHeatmap_carbonfixation.png"),
+       width = 10, height = nrow(tempMatrix_kterms)*0.3)
+
+```
+
+## Imogen Analysis
+```{r}
+### IMOGEN - PCOA + VOLCANO PLOTS
+library(apeglm)
+library(tibble)
+# source("gene_function_annotation.R")
+sampleTable <- data.frame(Sample = c("Sample1", "Sample2", "Sample3"),
+  Condition = c("d10", "d10", "d10", "apo","apo","apo"))
+
+#Read gene function data
+gene_function_file <- "uniprotkb_elysia_chlorotica_2023_10_30.tsv"
+gene_function_info <- read.delim(gene_function_file,header=TRUE,sep="\t") 
+gene_function_info <- echloroticaAnnotation_data[order(gene_function_info$Gene.Names),]
+
+# Create a count matrix with genes as rows and samples as columns
+countMatrix <- mergedEchlorTidy_processed %>%
+  column_to_rownames('geneID') %>%
+  dplyr::select(2,3,4,5,6,7) %>%
+  as.matrix()
+colnames(countMatrix) <- c(rep("d10",3),rep("apo",3))
+
+### Create a DESeqDataSet object
+dds <- DESeqDataSetFromMatrix(countData = round(countMatrix), colData = sampleTable, design = ~ Condition) 
+dds <- DESeq(dds)
+res <- results(dds, name="Condition_d10_vs_apo")
+resLFC <- lfcShrink(dds, coef="Condition_d10_vs_apo", type="apeglm")
+resOrdered <- na.omit(res[order(res$padj),])
+
+### Create MA-plot (log2 fold changes over mean of normalised counts)
+DESeq2::plotMA(resLFC, main="title", colNonSig = "gray60",colSig = "blue",  colLine = "grey40") 
+# idx <- identify(res$baseMean, res$log2FoldChange) #run to activate identifier <-  click on points to get gene ID
+rownames(res)[idx]
+
+```
+
+## Generating PCA plot
+```{r, echo=FALSE}
+#Using prcomp
+countMatrix <- mergedEchlorNorm_TPM %>%
+  column_to_rownames('geneID') %>%
+  dplyr::select(2,3,4,5,6,7) %>% as.matrix()
+colnames(countMatrix) <- c(rep("d10",3),rep("apo",3))
+
+dds.pcoa <- countMatrix %>% t() %>% prcomp()
+g <- ggbiplot(pcobj = dds.pcoa, var.axes = FALSE,groups=c(rep("d10",3),rep("apo",3)))+
+  geom_point(aes(colour=c("d10","d10","d10","apo","apo","apo")),size=2)+
+  coord_equal(ratio = 0.5)
+g
+ggsave(g,file="PCA_plot_prcomp.png", width=4, height=4, dpi=300)
+
+
+#Using DESeq
+# vsd <- varianceStabilizingTransformation(dds, blind=FALSE)
+# rld <- rlog(dds, blind=FALSE)
+# DESeq2::plotPCA(vsd, intgroup=c("Condition")) +ggtitle("PCA from DESeq2 plotPCA")
+```
+
+## Generating volcano plot
+```{r, echo=FALSE}
+library(EnhancedVolcano)
+library(ggbiplot)
+#Using ggplot
+volcano_data <- data.frame(log2FoldChange=res$log2FoldChange, log10P=-log10(res$padj), gene = rownames(res))
+volcano_data$inPathway <- ifelse(volcano_data$gene %in% genesInPath, TRUE,FALSE) 
+volcano_plot <- ggplot(volcano_data%>%arrange(inPathway), aes(x = log2FoldChange, y = log10P, color=inPathway)) +
+    geom_point(alpha=0.5) + theme_minimal() +
+    scale_color_manual(values = c("FALSE" = "grey", "TRUE"="red")) +  
+    labs(title = "Genes in KEGG pathway 'carbon fixation'",x = "log2(Fold Change)",y = "-log10(Adjusted P-value)",color="In Pathway")+
+    geom_hline(yintercept=1.3) + geom_vline(xintercept=log2(0.8))+ geom_vline(xintercept=-log2(0.8))
+volcano_plot
+ggsave(volcano_plot,file="volcano_carbonfixation.png", width=6, height=4, dpi=300)
+
+#Using Enhanced Volcano
+### Create Volcano plots using EnhancedVolcano
+EnhancedVolcanoe <- EnhancedVolcano(resLFC, lab=NA, x='log2FoldChange', y='pvalue', selectLab = genesInPath,max.overlaps = 50,
+                  drawConnectors = TRUE,widthConnectors = 0.75, pCutoff=0.05, FCcutoff=0.8, pointSize=2.0, labSize = 4.0)
+ggsave(EnhancedVolcanoe,file="enhanced_volcano_blank.png",width=12, height=10,dpi=300)
+```
+
+
+```{r}
+
+### Comparing LIMMA to DESeq2
+limmaResults <- topTable(limmaFit,number = 100000)
+deseq2Results <- results(dds) %>% as.data.frame()
+
+limmaDeseq_List <- UpSetR::fromList(list(`DESeqHitsUP`=row.names(deseq2Results)[deseq2Results$padj<=0.05&deseq2Results$log2FoldChange>0],
+                      `DESeqHitsDOWN`=row.names(deseq2Results)[deseq2Results$padj<=0.05&deseq2Results$log2FoldChange<0],
+                      `LIMMAHitsUP`=row.names(limmaResults)[limmaResults$adj.P.Val<=0.05&limmaResults$logFC>0],
+                      `LIMMAHitsDOWN`=row.names(limmaResults)[limmaResults$adj.P.Val<=0.05&limmaResults$logFC<0]))
+
+UpSetR::upset(limmaDeseq_List)
+### DESeq seems to identify slightly more upregulated hits (43 more) while LIMMA identifies much more downregulated hits (1300 more). These are likely low expression genes - I'll take some time to check but this probably isn't super important.
+
+```
+
+
+```{r}
+## Note - Only around 50% of the E chlorotica genome is actually annotated with any GO terms. For the remaining 50% of the genome we can either choose to ignore or we can try an use a homology-based search (something beyond a simple BLAST search)
+mergedEchlorTPM_annotated <- read_tsv("normalised_annotated.annotated.tsv")
+
+```
+
+Credits to Guido Hooiveld for inspiring the below two chunks of code
+Refer to this blogpost for how to write custom Gene Set Enrichment Analysis - Pretty helpful for any nonpara GSEA test
+[https://guangchuangyu.github.io/2015/05/use-clusterprofiler-as-an-universal-enrichment-analysis-tool/]
+
+```{r GO dataset setup}
+
+mapping.index <-  echlorGAF@itemName2ItemIndex
+ID.annotations <- itemAnnotations(echlorGAF)
+
+GO.sets <- echlorGAF@sets
+GO.annotation <- setAnnotations(echlorGAF)
+
+
+# create a 2-column data frame with GOID and ID index
+# after little further processing, this will be used as input for clusterProfiler
+GO.df <- data.frame("GOID" = rep(names(GO.sets), sapply(GO.sets, length)),
+        "ID.index" = unlist(GO.sets),  row.names = NULL)
+
+# GO.annotation
+GO.annotation <- GO.annotation[GO.annotation[,"term"] != "all", ]
+GO.annotation[,"GOID"] <- rownames(GO.annotation)
+
+# GO.df
+GO.df <- GO.df[GO.df[,"GOID"] != "all", ]
+GO.df[,"UNIPROTKB"] <- names(mapping.index [GO.df[,"ID.index"] ])
+
+```
+
+```{r GO enrichment results}
+
+eChlor_rankedGenes <- d10vsApo_hits %>%
+  arrange(desc(t)) %>%
+  pull(UNIPROTKB)
+
+eChlorGO_results <- enricher(
+    gene=eChlor_rankedGenes,
+    pvalueCutoff = 0.05,
+    pAdjustMethod = "BH",
+    universe = keyEchlor$UNIPROTKB,
+    minGSSize = 10,
+    maxGSSize = 500,
+    TERM2GENE = GO.df[,c("GOID","UNIPROTKB")],
+    TERM2NAME = GO.annotation[,c("GOID", "term")]
+)
+
+tempVis <- barplot(eChlorGO_results, showCategory=20)
+ggsave("barplotGO.png",tempVis, height = 10)
+tempVis <- dotplot(eChlorGO_results, showCategory=20)
+ggsave("dotplotGO.png",tempVis, height = 10)
+# cnetplot(eChlorGO_results, showCategory=10)
+# heatplot(eChlorGO_results, showCategory=10)
+tempVis <- emapplot(pairwise_termsim(eChlorGO_results), node_scale=1.5,layout="kk")
+ggsave("emapplotGO.png",tempVis, width = 12, height = 12)
+
+write_tsv(eChlorGO_results %>% as.data.frame(),"GOResults.tsv")
+
+```
+
+
